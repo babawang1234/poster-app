@@ -49,12 +49,24 @@ app.use('/api/admin', adminRoutes)
 app.use('/api/assets', assetRoutes)
 app.use('/api/inspire', inspireRoutes)
 
+// 生产/云端部署：托管前端构建产物，实现「单端口」运行
+// 本地开发时 client/dist 不存在，这段自动跳过，仍走 Vite 开发服务器
+const clientDist = path.resolve(__dirname, '../../client/dist')
+if (fs.existsSync(clientDist)) {
+  app.use(express.static(clientDist))
+  // SPA 回退：非 API、非静态资源的路径统一返回 index.html
+  app.get(/^\/(?!api\/|uploads\/|exports\/|templates\/|generated\/|design-backdrops\/|ai-images\/).*/, (req, res) => {
+    res.sendFile(path.join(clientDist, 'index.html'))
+  })
+}
+
 app.use(notFound)
 app.use(errorHandler)
 
-app.listen(config.port, () => {
+app.listen(config.port, '0.0.0.0', () => {
   console.log(`[server] AI 海报工作台已启动：http://localhost:${config.port}`)
   console.log(`[server] 环境：${config.env}`)
+  if (fs.existsSync(clientDist)) console.log('[server] 已托管前端静态资源（单端口模式）')
 })
 
 export default app

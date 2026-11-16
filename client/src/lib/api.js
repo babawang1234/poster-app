@@ -14,7 +14,11 @@ export function getToken() {
 
 async function request(method, path, body, { isForm = false } = {}) {
   const headers = {}
-  if (authToken) headers.Authorization = `Bearer ${authToken}`
+  // 认证走自定义头：云端分享网关会覆盖 Authorization，导致 token 被网关会话替换
+  if (authToken) {
+    headers['X-Auth-Token'] = authToken
+    headers.Authorization = `Bearer ${authToken}`
+  }
   if (!isForm && body !== undefined) headers['Content-Type'] = 'application/json'
 
   const res = await fetch(`${API_BASE}${path}`, {

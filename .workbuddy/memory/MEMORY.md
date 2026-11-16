@@ -24,3 +24,14 @@
 - Key 全空时自动降级；Key 填在 server/.env（ZHIPU_API_KEY / PIXABAY_API_KEY）
 - 注册教程见 server/API_KEYS.md
 - 重要教训：花瓣/站酷无开放API且不可商用，不要硬扒；免费额度扛不住公共并发，必须缓存复用
+
+## 启动避坑（2026-11 遇到，务必按此启动）
+- WorkBuddy 宿主注入 `NODE_OPTIONS=--require=<旧版shim路径>`，新版目录已改为
+  `resources/app.asar.unpacked/cli/vendor/sandbox-center-runtime-kit/shim`，
+  旧路径 `cli/vendor/shim/node-language-shim.cjs` 不存在 → node 报 EPERM/ENOENT。
+  **启动前必须 `NODE_OPTIONS= node src/index.js`（bash）或 `$env:NODE_OPTIONS=""`（PowerShell）**
+- 根目录 `npm run dev`（concurrently）在 Git Bash 下报 `spawn cmd.exe ENOENT`，不要用；
+  改为分别启动：`cd server && node src/index.js`、`cd client && node ../node_modules/vite/bin/vite.js --host`
+- 系统 `http_proxy/https_proxy` 指向 127.0.0.1:2266 常失效，会让 curl 连本地服务也失败；
+  本地请求改用 node fetch 或 `env -u http_proxy -u https_proxy`；`git push/pull` 也要清代理
+- 一键启动脚本：`bash scripts/start-dev.sh` 或 `powershell scripts/start-dev.ps1`（已封装以上修复）

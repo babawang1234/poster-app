@@ -11,7 +11,12 @@ export const config = {
   clientOrigin: process.env.CLIENT_ORIGIN || 'http://localhost:5173',
   jwt: {
     secret: process.env.JWT_SECRET || 'dev-secret-change-me',
-    expiresIn: process.env.JWT_EXPIRES_IN || '604800',
+    // 注意：jsonwebtoken 对字符串会按 ms() 解析，'604800' 会被当成 604800 毫秒（约 10 分钟）。
+    // 这里统一转成数字，单位明确为「秒」，默认 7 天。
+    expiresIn: (() => {
+      const n = parseInt(process.env.JWT_EXPIRES_IN || '', 10)
+      return Number.isFinite(n) && n > 0 ? n : 604800
+    })(),
   },
   dbPath: path.resolve(__dirname, '../../', process.env.DB_PATH || './data/app.db'),
   uploadDir: path.resolve(__dirname, '../../', process.env.UPLOAD_DIR || './uploads'),

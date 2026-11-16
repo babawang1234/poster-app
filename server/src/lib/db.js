@@ -154,6 +154,17 @@ export function migrate() {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    -- LLM 响应缓存：相同输入（模型+system+prompt+图片指纹）直接复用结果，避免重复计费
+    CREATE TABLE IF NOT EXISTS llm_cache (
+      key TEXT PRIMARY KEY,                 -- sha256(model|system|prompt|imageHash)
+      model TEXT NOT NULL,
+      scope TEXT NOT NULL DEFAULT 'text',   -- text | analyze
+      content TEXT NOT NULL,
+      hits INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_hit_at TEXT
+    );
+
     CREATE INDEX IF NOT EXISTS idx_ledger_user ON credit_ledger(user_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_tasks_user ON generation_tasks(user_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_projects_user ON projects(user_id, created_at);

@@ -6,6 +6,10 @@ import { searchAssetImages, searchDesignAssets } from '../services/asset-search.
 import { generateDesignBackdrops } from '../lib/design-backdrop.js'
 import { encodeBufferToDataUrl } from '../lib/renderer.js'
 import { getCachedGeneration, setCachedGeneration } from '../lib/gen-cache.js'
+import { scrapeImages, scraperStatus, ScrapeError, validateTarget } from '../lib/scraper.js'
+import path from 'path'
+import fs from 'fs'
+import { genId } from '../lib/util.js'
 
 const router = Router()
 router.use(authRequired)
@@ -193,6 +197,80 @@ router.post('/select', asyncHandler(async (req, res) => {
     if (!response.ok) throw new Error(`Unsplash 素材确认失败（HTTP ${response.status}）`)
   }
   res.json({ ok: true })
+}))
+
+// 从指定页面抓取图片（Node 内置实现，含 robots.txt / 内网拦截 / 限速护栏）
+router.get('/scraper-status', (req, res) => {
+  res.json(scraperStatus())
+})
+
+router.post('/scrape', asyncHandler(async (req, res) => {
+  const url = String(req.body?.url || '').trim().slice(0, 500)
+  if (!url) return res.status(400).json({ error: 'INVALID_URL', message: '请先填写要抓取的页面网址' })
+  const max = Math.min(60, Math.max(1, Number(req.body?.max) || 30))
+
+  try {
+    const result = await scrapeImages(url, { max })
+    res.json(result)
+  } catch (err) {
+    if (err instanceof ScrapeError) {
+      return res.status(err.status || 400).json({ error: 'SCRAPE_FAILED', message: err.message })
+    }
+    throw err
+  }
+}))
+
+// 把抓取到的图片下载进本地素材库，之后就当成普通上传图片使用（可作参考图）
+const IMAGE_EXT_BY_MIME = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/webp': '.webp',
+  'image/gif': '.gif',
+}
+
+router.post('/scrape-save', asyncHandler(async (req, res) => {
+  const imageUrl = String(req.body?.url || '').trim().slice(0, 1000)
+  if (!imageUrl) return res.status(400).json({ error: 'INVALID_URL', message: '请提供图片地址' })
+
+  let parsed
+  try {
+    parsed = validateTarget(imageUrl)
+  } catch (err) {
+    if (err instanceof ScrapeError) return res.status(err.status || 400).json({ error: 'SCRAPE_FAILED', message: err.message })
+    throw err
+  }
+
+  const response = await fetch(parsed.toString(), {
+    headers: { 'User-Agent': 'PosterStudioBot/1.0', Accept: 'image/*' },
+    signal: AbortSignal.timeout(20000),
+  })
+  if (!response.ok) {
+    return res.status(502).json({ error: 'DOWNLOAD_FAILED', message: `下载图片失败（HTTP ${response.status}）` })
+  }
+
+  const mime = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase()
+  const ext = IMAGE_EXT_BY_MIME[mime]
+  if (!ext) return res.status(400).json({ error: 'NOT_IMAGE', message: '该地址不是支持的图片格式（jpg/png/webp/gif）' })
+
+  const buffer = Buffer.from(await response.arrayBuffer())
+  if (buffer.length > 10 * 1024 * 1024) {
+    return res.status(413).json({ error: 'TOO_LARGE', message: '图片超过 10MB，请换一张' })
+  }
+
+  fs.mkdirSync(config.uploadDir, { recursive: true })
+  const filename = `${genId('up')}${ext}`
+  fs.writeFileSync(path.join(config.uploadDir, filename), buffer)
+
+  res.status(201).json({
+    file: {
+      id: genId('file'),
+      filename: path.basename(parsed.pathname) || `scraped${ext}`,
+      url: `/uploads/${filename}`,
+      mimetype: mime,
+      size: buffer.length,
+      sourceUrl: parsed.toString(),
+    },
+  })
 }))
 
 export default router

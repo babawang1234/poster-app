@@ -105,6 +105,10 @@ export default function Studio() {
   const [referenceAsset, setReferenceAsset] = useState(null)
   const [styleAnalysis, setStyleAnalysis] = useState(null)
   const [analyzing, setAnalyzing] = useState(false)
+  const [scrapeUrl, setScrapeUrl] = useState('')
+  const [scraping, setScraping] = useState(false)
+  const [scrapedImages, setScrapedImages] = useState([])
+  const [savingScraped, setSavingScraped] = useState('')
   const [lockedFields, setLockedFields] = useState({})
   const [stockQuery, setStockQuery] = useState('')
   const [stockPhotos, setStockPhotos] = useState([])
@@ -447,11 +451,20 @@ export default function Studio() {
     setAnalyzing(true)
     try {
       const up = await api.upload('/upload', (() => { const fd = new FormData(); fd.append('file', file); return fd })())
-      // 视觉分析走后端模型（未接入真实视觉模型时返回演示结果）
-      setReferenceAsset(up.file)
-      const task = await api.post('/generate', { projectId: project?.id, capability: 'image_input', params: { imageUrl: up.file.url, prompt: '分析参考图风格' } })
+      await runReferenceAnalysis(up.file)
+    } catch (e) {
+      toast.error(e.message)
+      setAnalyzing(false)
+    }
+  }
+
+  /** 对已就位的参考图做视觉分析（上传与网页抓取共用同一条链路） */
+  async function runReferenceAnalysis(uploadedFile) {
+    setAnalyzing(true)
+    try {
+      setReferenceAsset(uploadedFile)
+      const task = await api.post('/generate', { projectId: project?.id, capability: 'image_input', params: { imageUrl: uploadedFile.url, prompt: '分析参考图风格' } })
       const run = await api.post(`/generate/${task.task.id}/run`)
-      const est = await api.post('/generate/estimate', { capability: 'image_input' })
       let analysis = run.output
       if (typeof analysis === 'string') {
         try { analysis = JSON.parse(analysis) } catch { analysis = {} }
@@ -475,6 +488,43 @@ export default function Studio() {
       toast.error(e.message)
     } finally {
       setAnalyzing(false)
+    }
+  }
+
+  /** 从指定网页抓取图片列表 */
+  async function scrapePageImages() {
+    const target = String(scrapeUrl || '').trim()
+    if (!target) {
+      toast.error('请先填写要抓取的网页地址')
+      return
+    }
+    setScraping(true)
+    setScrapedImages([])
+    try {
+      const data = await api.post('/assets/scrape', { url: target, max: 24 })
+      setScrapedImages(data.images || [])
+      if (!data.images?.length) toast.push('该页面没有找到可用图片，换一个页面试试')
+      else toast.success(`抓到 ${data.images.length} 张图片`)
+    } catch (e) {
+      toast.error(e.message)
+    } finally {
+      setScraping(false)
+    }
+  }
+
+  /** 把抓到的图片存入素材库并作为参考图 */
+  async function useScrapedImage(image) {
+    setSavingScraped(image.url)
+    try {
+      const saved = await api.post('/assets/scrape-save', { url: image.url })
+      const file = saved.file
+      setRefFile({ name: file.filename, size: file.size })
+      setRefPreview(file.url)
+      await runReferenceAnalysis(file)
+    } catch (e) {
+      toast.error(e.message)
+    } finally {
+      setSavingScraped('')
     }
   }
 
@@ -1174,6 +1224,45 @@ export default function Studio() {
                   </div>
                 </div>
               )}
+
+              {/* 从网页抓取图片：服务端抓取 + 一键存为参考图 */}
+              <details className="mt-4 rounded-xl border border-white/10 bg-white/[0.02] p-3">
+                <summary className="cursor-pointer text-xs font-medium text-white/60">从设计网站抓取图片（可选）</summary>
+                <p className="mt-2 text-[11px] leading-relaxed text-white/35">
+                  填入页面网址，抓取该页图片后可一键存为参考图。仅抓取 robots.txt 允许的公开页面，不绕过登录墙与付费墙。
+                </p>
+                <div className="mt-2 flex gap-2">
+                  <input
+                    className="input text-xs"
+                    value={scrapeUrl}
+                    onChange={(e) => setScrapeUrl(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && scrapePageImages()}
+                    placeholder="例如 https://example.com/gallery"
+                    aria-label="要抓取的网页地址"
+                  />
+                  <button onClick={scrapePageImages} disabled={scraping} className="btn-ghost shrink-0 text-xs">
+                    {scraping ? '抓取中…' : '抓取'}
+                  </button>
+                </div>
+                {scrapedImages.length > 0 && (
+                  <div className="mt-3 grid grid-cols-4 gap-2">
+                    {scrapedImages.map((img) => (
+                      <button
+                        key={img.url}
+                        onClick={() => useScrapedImage(img)}
+                        disabled={savingScraped === img.url}
+                        className="group relative overflow-hidden rounded-lg border border-white/10 hover:border-brand-cyan"
+                        title={img.alt || img.url}
+                      >
+                        <img src={img.url} alt={img.alt || '抓取图片'} loading="lazy" className="aspect-square w-full object-cover transition group-hover:scale-105" referrerPolicy="no-referrer" />
+                        {savingScraped === img.url && (
+                          <span className="absolute inset-0 flex items-center justify-center bg-black/60 text-[10px] text-white">保存中…</span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </details>
 
               {analyzing && (
                 <div className="mt-3 flex items-center gap-2 text-sm text-brand-cyan">
