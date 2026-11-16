@@ -29,6 +29,9 @@ async function crawlZcool(kw) {
   return [...new Set(urls)].filter((u) => u.includes('zcool') || u.includes('img.zcool'))
 }
 
+// 搜索页里除内容图外还混着头像、图标、占位图等，直接展示会显得"素材很杂"。
+const NON_CONTENT = /avatar|\/icon|favicon|\blogo|sprite|placeholder|loading|default_|emoji|qrcode|erweima/i
+
 /**
  * 搜索中文素材，返回标准化 photo 列表（url 为源站 CDN 直链，前端直接展示）。
  * @param {string} query 关键词
@@ -44,6 +47,7 @@ export async function searchCnAssets(query, { limit = 24 } = {}) {
 
   const unique = [...new Set(results)]
     .filter((u) => /\.(jpg|jpeg|png|webp)/i.test(u))
+    .filter((u) => !NON_CONTENT.test(u))
     .slice(0, limit)
 
   return unique.map((url, i) => ({

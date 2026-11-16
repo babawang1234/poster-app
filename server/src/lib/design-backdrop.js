@@ -148,14 +148,58 @@ function lerpColor(c1, c2, t) {
   return `#${[r, g, b].map((c) => c.toString(16).padStart(2, '0')).join('')}`
 }
 
+// 色相旋转：让同一主题下的多张底图配色有区分度，
+// 否则 8 种图案共用一套配色，视觉上仍然"看起来都一样"。
+function shiftHue(hex, deg) {
+  const [r, g, b] = hexToRgb(hex).map((v) => v / 255)
+  const max = Math.max(r, g, b)
+  const min = Math.min(r, g, b)
+  const l = (max + min) / 2
+  let h = 0
+  let s = 0
+  if (max !== min) {
+    const d = max - min
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min)
+    if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6
+    else if (max === g) h = ((b - r) / d + 2) / 6
+    else h = ((r - g) / d + 4) / 6
+  }
+  h = ((h + deg / 360) % 1 + 1) % 1
+  const hue2rgb = (p, q, t) => {
+    if (t < 0) t += 1
+    if (t > 1) t -= 1
+    if (t < 1 / 6) return p + (q - p) * 6 * t
+    if (t < 1 / 2) return q
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6
+    return p
+  }
+  let nr = l
+  let ng = l
+  let nb = l
+  if (s !== 0) {
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s
+    const p = 2 * l - q
+    nr = hue2rgb(p, q, h + 1 / 3)
+    ng = hue2rgb(p, q, h)
+    nb = hue2rgb(p, q, h - 1 / 3)
+  }
+  return `#${[nr, ng, nb].map((c) => Math.round(c * 255).toString(16).padStart(2, '0')).join('')}`
+}
+
 // 生成一张"设计底图"PNG，返回 Buffer。
-// 用 variant 切换 8 种差异明显的高级设计风格。
+// 用 variant 切换 8 种差异明显的高级设计风格；配色再按 variant 做温和色相偏移，
+// 让「同一关键词生成 8 张」彼此可辨，而不是 8 张同色系近似图。
 export function renderDesignBackdrop({ keyword, width = 1080, height = 1440, variant = 0 }) {
-  const [c1, c2, c3] = pickTheme(keyword)
+  const [t1, t2, t3] = pickTheme(keyword)
+  const style = variant % 8
+  // 色相偏移控制在 ±24° 以内，既保持主题识别度，又能拉开区分
+  const rot = (style - 3.5) * 7
+  const c1 = shiftHue(t1, rot)
+  const c2 = shiftHue(t2, rot * 0.6)
+  const c3 = t3
   const canvas = createCanvas(width, height)
   const ctx = canvas.getContext('2d')
 
-  const style = variant % 8
   switch (style) {
     case 0: renderFluidGradient(ctx, width, height, c1, c2, c3); break
     case 1: renderMemphis(ctx, width, height, c1, c2, c3); break
@@ -344,19 +388,21 @@ function addGrain(ctx, w, h, alpha) {
 }
 
 // 生成多张设计底图（不同 variant）
-export function generateDesignBackdrops(keyword, { count = 4, width = 1080, height = 1440 } = {}) {
+// variantOffset 用于让不同请求拿到不同的起始风格（一键成片等单图场景可随机化）
+export function generateDesignBackdrops(keyword, { count = 4, width = 1080, height = 1440, variantOffset = 0 } = {}) {
   const backdrops = []
   for (let i = 0; i < count; i++) {
-    const buf = renderDesignBackdrop({ keyword, width, height, variant: i })
+    const variant = variantOffset + i
+    const buf = renderDesignBackdrop({ keyword, width, height, variant })
     backdrops.push({
-      id: `design-${Date.now()}-${i}`,
+      id: `design-${Date.now()}-${variant}`,
       provider: 'design',
       sourceName: '设计底图',
-      description: `${keyword} · 设计背景 ${i + 1}`,
+      description: `${keyword} · 设计背景 ${variant + 1}`,
       buffer: buf,
       width,
       height,
-      variant: i,
+      variant,
       license: '设计底图 · 可商用',
     })
   }

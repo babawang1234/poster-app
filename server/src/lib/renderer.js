@@ -4,6 +4,7 @@ import fs from 'fs'
 import { fileURLToPath } from 'url'
 import { lookup } from 'node:dns/promises'
 import { isIP } from 'node:net'
+import { unwrapProxyUrl, fetchToCache } from './image-proxy.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -212,12 +213,20 @@ async function drawImage(ctx, layer, w, h) {
   if (!src) return
   let img
   try {
+    // 代理地址（/api/img?u=...）需要先还原成真实外部 URL 再拉取，
+    // 否则会被当成站内相对路径去 public 目录找文件而失败。
+    const proxied = unwrapProxyUrl(src)
+    const remoteSrc = typeof src === 'string' && src.startsWith('https://') ? src : proxied
     // 支持本地路径或 base64 data URL
     if (typeof src === 'string' && src.startsWith('data:')) {
       img = await loadImage(src)
-    } else if (typeof src === 'string' && src.startsWith('https://')) {
-      await assertPublicImageUrl(src)
-      const response = await fetch(src, { redirect: 'error', signal: AbortSignal.timeout(10000) })
+    } else if (proxied) {
+      // 代理地址：直接复用图片代理的磁盘缓存，避免每渲染一次都重新下载原图
+      const { filePath } = await fetchToCache(proxied)
+      img = await loadImage(filePath)
+    } else if (remoteSrc && remoteSrc.startsWith('https://')) {
+      await assertPublicImageUrl(remoteSrc)
+      const response = await fetch(remoteSrc, { redirect: 'error', signal: AbortSignal.timeout(10000) })
       if (!response.ok) throw new Error(`素材加载失败：${response.status}`)
       if (!String(response.headers.get('content-type') || '').startsWith('image/')) throw new Error('素材源返回的不是图片')
       const bytes = Buffer.from(await response.arrayBuffer())

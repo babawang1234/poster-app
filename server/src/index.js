@@ -5,6 +5,7 @@ import fs from 'fs'
 import { fileURLToPath } from 'url'
 import { config } from './config/index.js'
 import { migrate } from './lib/db.js'
+import { handleImageProxy } from './lib/image-proxy.js'
 import { errorHandler, notFound } from './middleware/error.js'
 
 import authRoutes from './routes/auth.js'
@@ -16,6 +17,7 @@ import uploadRoutes from './routes/upload.js'
 import adminRoutes from './routes/admin.js'
 import assetRoutes from './routes/assets.js'
 import inspireRoutes from './routes/inspire.js'
+import systemRoutes from './routes/system.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -39,6 +41,10 @@ app.use('/ai-images', express.static(path.resolve(__dirname, '../public/ai-image
 
 app.get('/api/health', (req, res) => res.json({ ok: true, env: config.env }))
 
+// 图片代理：外部素材站有 Referer 防盗链，浏览器直连会被 403。
+// 统一由服务端带源站 Referer 取图 + 磁盘缓存，前端一律加载 /api/img?u=...
+app.get('/api/img', handleImageProxy)
+
 app.use('/api/auth', authRoutes)
 app.use('/api/account', accountRoutes)
 app.use('/api/projects', projectRoutes)
@@ -48,6 +54,7 @@ app.use('/api/upload', uploadRoutes)
 app.use('/api/admin', adminRoutes)
 app.use('/api/assets', assetRoutes)
 app.use('/api/inspire', inspireRoutes)
+app.use('/api/system', systemRoutes)
 
 // 生产/云端部署：托管前端构建产物，实现「单端口」运行
 // 本地开发时 client/dist 不存在，这段自动跳过，仍走 Vite 开发服务器

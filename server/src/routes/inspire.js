@@ -7,9 +7,15 @@ import { autoRoute, invoke } from '../adapters/index.js'
 import { searchLocalPool, toPhoto } from '../lib/local-image-pool.js'
 import { generateLayouts } from '../lib/layouts.js'
 import { renderPoster, encodeBufferToDataUrl } from '../lib/renderer.js'
+import { proxyUrl } from '../lib/image-proxy.js'
 
 const router = Router()
 router.use(authRequired)
+
+// 同一 prompt 的生图请求合并：并发点击只触发一次真实生成，避免撞上匿名层限速。
+const aiInflight = new Map()
+// 一键成片底图轮转游标：保证连续多次成片不会反复用同一张底图
+let poolCursor = 0
 
 const PURPOSES = new Set(['活动宣传', '产品推广', '电商促销', '社媒运营', '品牌宣传', '招聘启事', '节日祝福'])
 const RATIOS = new Set(['3:4', '9:16', '1:1', '16:9'])
@@ -267,15 +273,54 @@ router.post(
     if (pollinations.available) {
       // Pollinations 匿名层限速 45 秒/张。策略：只真实生成 1 张，再派生多张视觉变体，
       // 让用户一次看到多张贴题、可用的底图（而非只返回 1 张）。
-      const prompts = buildImagePromptVariants(keyword, 1)
-      const images = []
-      try {
-        const { buffer } = await pollinations.generateImage({ prompt: prompts[0], width: 1080, height: 1440 })
-        // 由 1 张真图派生多张变体，规避限速
-        const variants = await deriveVariants(buffer, Math.max(1, count))
-        variants.forEach((v, i) => {
+      // 关键补充：结果落盘缓存 + 同 prompt 并发合并。
+      // 否则用户等不及而连点几次，会连续撞上限速，表现就是「AI 生图生成不了」。
+      const prompt = buildImagePromptVariants(keyword, 1)[0]
+      const W = 1080
+      const H = 1440
+      let baseBuffers = getCachedGeneration(prompt, W, H) || []
+      const fromCache = baseBuffers.length > 0
+
+      if (!fromCache) {
+        const flightKey = `${prompt}|${W}|${H}`
+        if (!aiInflight.has(flightKey)) {
+          aiInflight.set(
+            flightKey,
+            (async () => {
+              const { buffer } = await pollinations.generateImage({
+                prompt,
+                width: W,
+                height: H,
+                seed: Math.floor(Math.random() * 1e9),
+              })
+              setCachedGeneration(prompt, W, H, [buffer])
+              return [buffer]
+            })()
+          )
+        }
+        try {
+          baseBuffers = await aiInflight.get(flightKey)
+        } catch (e) {
+          console.warn(`[inspire] Pollinations 生成失败：${e.message}`)
+          // 限速时给出可操作提示，而不是笼统的「失败」
+          if (e.status === 402) {
+            return res.status(429).json({
+              error: 'AI_RATE_LIMITED',
+              message: '免费 AI 生图通道受限速（约 45 秒 1 张），请稍等约 1 分钟再试，或换个关键词。',
+              images: [],
+            })
+          }
+        } finally {
+          aiInflight.delete(flightKey)
+        }
+      }
+
+      let images = []
+      if (baseBuffers.length) {
+        const variants = await deriveVariants(baseBuffers[0], Math.max(1, count))
+        images = variants.map((v, i) => {
           const dataUrl = encodeBufferToDataUrl(v.buffer, 'image/jpeg')
-          images.push({
+          return {
             id: `ai-p-${Date.now()}-${i}`,
             provider: 'ai',
             sourceName: 'AI 生成',
@@ -284,15 +329,14 @@ router.post(
             description: `${keyword} · AI 生成底图 ${i + 1}`,
             photographer: 'AI 生成',
             license: 'AI 生成 · 可商用',
-          })
+          }
         })
-      } catch (e) {
-        console.warn(`[inspire] Pollinations 生成失败：${e.message}`)
       }
       if (images.length) {
         return res.json({
           images,
           provider: 'pollinations',
+          cached: fromCache,
           message: images.length >= count ? '' : `已生成 ${images.length} 张（免费 AI 生图限速，可再次点击生成新的一组）`,
         })
       }
@@ -347,9 +391,15 @@ router.post(
     let stockAsset = null
     let backgroundSource = 'none'
 
-    const localPoolHits = searchLocalPool(subjectQuery, { limit: 1 })
+    const localPoolHits = searchLocalPool(subjectQuery, { limit: 8 })
     if (localPoolHits.length) {
-      stockAsset = toPhoto(localPoolHits[0])
+      // 之前固定取 [0]，同一主题反复出片永远是同一张底图。
+      // 用「轮转 + 小幅随机」：轮转保证连续多次一定不同，随机避免每次都从第一张开始。
+      const shortlist = localPoolHits.slice(0, Math.min(6, localPoolHits.length))
+      const picked = shortlist[poolCursor++ % shortlist.length]
+      stockAsset = toPhoto(picked)
+      stockAsset.url = proxyUrl(stockAsset.url)
+      stockAsset.thumb = proxyUrl(stockAsset.thumb)
       backgroundSource = 'library'
     }
 
@@ -362,7 +412,14 @@ router.post(
         if (pollinations.available) {
           const prompt = keywordToImagePrompt(subjectQuery)
           if (prompt) {
-            const { buffer } = await pollinations.generateImage({ prompt, width: 1080, height: 1440 })
+            // 必须带随机 seed：pollinations 对相同 prompt 会返回同一张图，
+            // 不带 seed 会导致同一需求反复出片时底图完全一样。
+            const { buffer } = await pollinations.generateImage({
+              prompt,
+              width: 1080,
+              height: 1440,
+              seed: Math.floor(Math.random() * 1e9),
+            })
             const dataUrl = encodeBufferToDataUrl(buffer, 'image/jpeg')
             stockAsset = {
               id: `ai-shot-${Date.now()}`,
@@ -386,7 +443,9 @@ router.post(
       // 而不是空白或与主题无关的抽象渐变。
       try {
         const { generateDesignBackdrops } = await import('../lib/design-backdrop.js')
-        const backdrops = generateDesignBackdrops(subjectQuery, { count: 1 })
+        // 随机起始风格：避免每次兜底都出 variant 0 那一张
+        const variantOffset = Math.floor(Math.random() * 8)
+        const backdrops = generateDesignBackdrops(subjectQuery, { count: 1, variantOffset })
         if (backdrops.length) {
           const b = backdrops[0]
           const dataUrl = encodeBufferToDataUrl(b.buffer, 'image/png')

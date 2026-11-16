@@ -1,6 +1,7 @@
 import { config } from '../config/index.js'
 import { searchLocalPool, toPhoto } from '../lib/local-image-pool.js'
 import { searchCnAssets } from './cn-assets.js'
+import { proxyUrl } from '../lib/image-proxy.js'
 
 const CACHE_TTL = 5 * 60 * 1000
 const cache = new Map()
@@ -173,7 +174,7 @@ export async function searchDesignAssets(query, { count = 12 } = {}) {
       console.warn('[design-assets] Pixabay 设计素材搜索失败：', e.message)
     }
   }
-  return results
+  return results.map((photo) => ({ ...photo, url: proxyUrl(photo.url), thumb: proxyUrl(photo.thumb) }))
 }
 
 export async function searchAssetImages({ query, originalQuery, orientation, perPage = 18 }) {
@@ -232,7 +233,10 @@ export async function searchAssetImages({ query, originalQuery, orientation, per
     const bCn = b.provider === 'cn' ? 0 : 1
     return aCn - bCn
   })
-  const unique = [...new Map(sorted.map((photo) => [`${photo.provider}:${photo.id}`, photo])).values()].slice(0, perPage)
+  const unique = [...new Map(sorted.map((photo) => [`${photo.provider}:${photo.id}`, photo])).values()]
+    .slice(0, perPage)
+    // 外部图源有 Referer 防盗链，浏览器直连必然 403；统一改写成站内代理地址。
+    .map((photo) => ({ ...photo, url: proxyUrl(photo.url), thumb: proxyUrl(photo.thumb) }))
   const finalProviders = [...new Set(unique.map((photo) => photo.provider))]
 
   const value = {

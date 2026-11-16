@@ -35,3 +35,17 @@
 - 系统 `http_proxy/https_proxy` 指向 127.0.0.1:2266 常失效，会让 curl 连本地服务也失败；
   本地请求改用 node fetch 或 `env -u http_proxy -u https_proxy`；`git push/pull` 也要清代理
 - 一键启动脚本：`bash scripts/start-dev.sh` 或 `powershell scripts/start-dev.ps1`（已封装以上修复）
+
+## 云端登录 401 的真正根因（2026-11-16 已定位并修复，勿再误判）
+- **根因：WorkBuddy 分享网关会向应用注入它自己的 `Authorization: Bearer <网关会话>`，
+  覆盖前端发来的业务 token** → `jwt.verify` 报 `invalid signature` → 所有登录态接口 401。
+  之前记的「不是密钥问题」结论方向对，但误以为是 DB 异常兜底；实际是 header 被劫持。
+- **判别方法**：请求完全不带 header 时，服务端仍能读到 `Authorization`（长度 386，我们自己的 token 是 219）
+  → 一定是网关注入。加临时 `/api/__diag` 端点打印 `authHeaderLen` / 验签结果即可确诊。
+- **修复**：认证主通道改自定义头 `X-Auth-Token`（网关照抄不改写），头名在
+  `server/src/middleware/auth.js pickToken()` 与 `client/src/lib/api.js` 两处，改一处必改另一处。
+  `Authorization` 仅留作本地开发兼容回退。
+- **附带修复**：`JWT_EXPIRES_IN='604800'` 字符串被 jsonwebtoken 按 ms() 解析 → token 只活 **10 分钟**
+  （本想 7 天）。config 里已改为 parseInt 成数字秒。凡 `expiresIn` 一律传数字。
+- 教训：`authRequired` 的 try/catch 只该包 `jwt.verify`，DB 异常必须冒泡成 500，
+  否则 DB 故障会被伪装成「登录已过期」，浪费大量排查时间（已改）。

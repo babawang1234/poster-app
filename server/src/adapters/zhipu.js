@@ -37,13 +37,14 @@ export class ZhipuAdapter {
 
   /**
    * 串行生成多张图（每次 1 张，间隔限速），返回图片 URL 数组。
-   * @param {object} opts { prompt, width, height, n }
+   * @param {object} opts { prompt, width, height, n, model }
    */
-  async generateImage({ prompt, width = 1080, height = 1440, n = 1, model = 'cogview-3-plus' }) {
+  async generateImage({ prompt, width = 1080, height = 1440, n = 1, model = 'cogview-3-flash' }) {
     if (!this.apiKey) throw new Error('未配置 ZHIPU_API_KEY')
     const size = this._sizeFor(width, height)
     const count = Math.min(6, Math.max(1, n))
     const urls = []
+    this.lastError = ''
 
     for (let i = 0; i < count; i++) {
       // 每次用不同 prompt 变体，让图真正不同
@@ -51,10 +52,10 @@ export class ZhipuAdapter {
       const url = await this._generateOne(variantPrompt, size, model)
       if (url) urls.push(url)
       // 免费档限速：串行 + 间隔，避免 1302 限流
-      if (i < count - 1) await this._sleep(8000)
+      if (i < count - 1) await this._sleep(5000)
     }
 
-    if (!urls.length) throw new Error('智谱未返回任何图片')
+    if (!urls.length) throw new Error(this.lastError || '智谱未返回任何图片')
     return { urls, provider: 'zhipu', model }
   }
 
@@ -73,8 +74,16 @@ export class ZhipuAdapter {
 
       if (!res.ok) {
         const text = await res.text().catch(() => '')
+        // 1113 = 余额不足/无可用资源包。这不是限流，必须明确报出来，
+        // 否则会被误当成「稍后重试」而静默跳过，最终表现为「AI 生图生成不了」。
+        if (text.includes('1113') || text.includes('余额不足')) {
+          this.lastError = '智谱账户余额不足：免费模型 cogview-3-flash 可用，付费模型（cogview-3-plus）需充值后才能调用。'
+          console.warn('[zhipu] 余额不足（code 1113），已降级到免费模型/其他通道')
+          return null
+        }
         // 1302/429 限流：静默跳过，返回 null，让上层拿到已成功的那几张
         if (res.status === 429 || text.includes('1302') || text.includes('速率')) {
+          this.lastError = '智谱生图触发速率限制，请稍后再试。'
           console.warn('[zhipu] 触发速率限制，跳过本次')
           return null
         }

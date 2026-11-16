@@ -522,15 +522,10 @@ function tokenizeQuery(q) {
       tokens.add(matched)
       rest = rest.slice(matched.length)
     } else {
-      // 未命中字符：尝试收集连续的一段中文/字母作为一个"未知词"整体加入，
-      // 这样同义词映射和匹配仍有机会命中（否则这些词被逐个丢弃，导致搜不到）。
-      const m = rest.match(/^[\u4e00-\u9fa5a-zA-Z0-9]{2,}/)
-      if (m) {
-        tokens.add(m[0])
-        rest = rest.slice(m[0].length)
-      } else {
-        rest = rest.slice(1)
-      }
+      // 未命中：只前进一个字符，而不是把后面整段都当成「未知词」吞掉。
+      // 否则「新品咖啡上市」会被整串吃掉，其中的「咖啡」永远切不出来，
+      // 表现为明明有咖啡图却命中 0 张、只能落到 AI 兜底。
+      rest = rest.slice(1)
     }
   }
   // 保留单字词（如"茶""花""书"），但仅当它是「词典里的完整词」时才保留，

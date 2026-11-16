@@ -91,7 +91,7 @@ router.get('/search', asyncHandler(async (req, res) => {
             const { PollinationsAdapter, deriveVariants } = await import('../adapters/pollinations.js')
             const pollinations = new PollinationsAdapter()
             if (pollinations.available) {
-              const { buffer } = await pollinations.generateImage({ prompt, width: 1080, height: 1440 })
+              const { buffer } = await pollinations.generateImage({ prompt, width: 1080, height: 1440, seed: Math.floor(Math.random() * 1e9) })
               const variants = await deriveVariants(buffer, 6)
               setCachedGeneration(query, 1080, 1440, variants.map((v) => v.buffer))
               aiGeneratedPhotos = variants.map((v, i) => {
