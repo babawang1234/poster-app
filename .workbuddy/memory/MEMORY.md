@@ -49,3 +49,45 @@
   （本想 7 天）。config 里已改为 parseInt 成数字秒。凡 `expiresIn` 一律传数字。
 - 教训：`authRequired` 的 try/catch 只该包 `jwt.verify`，DB 异常必须冒泡成 500，
   否则 DB 故障会被伪装成「登录已过期」，浪费大量排查时间（已改）。
+
+## 素材/生图链路（2026-11-16 大修，排查同类问题先看这里）
+- **图片防盗链是「图不显示」的头号原因**：堆糖(dtstatic)/站酷等对 Referer 校验，
+  浏览器从本站加载返回 403，页面表现为一片空白，容易被误判成「后端没返回数据」。
+  判别：`curl 图URL` 返回 200 但 `<img>` 是破图 → 带 `Referer: 本站域名` 再试，403 即坐实。
+  解法：`server/src/lib/image-proxy.js`（服务端带源站 Referer 取图 + 磁盘缓存 + 域名白名单 + 内网拦截），
+  数据层用 `proxyUrl()` 统一改写，`renderer.js` 识别 `/api/img?u=` 并复用缓存（否则导出时图层会丢）。
+- **智谱余额不足会伪装成「生成失败」**：`cogview-3-plus` 是付费档，无余额返回 HTTP 429 + code 1113，
+  旧代码把它当 1302 限流静默跳过 → 一路降级到 pollinations（45s 限速）→ 最终只剩设计底图。
+  **默认必须用 `cogview-3-flash`（免费，实测可用，约 7.5s/张）**；1113 要明确报错。
+- 生图必须「落盘缓存 + 同 prompt 并发合并」，否则用户等不及连点就撞限速，观感就是「生成不了」。
+- 一键成片底图重复的根因是 `searchLocalPool(q,{limit:1})` 永远取第一张；
+  改用模块级轮转游标 `poolCursor`，连续多次必出不同图。AI 兜底要带随机 `seed`（pollinations 同 prompt 出同一张）。
+- **中文切词 bug**：`tokenizeQuery` 遇到词典外的字会把后面整段当「未知词」吞掉，
+  「新品咖啡上市」切不出「咖啡」→ 命中 0 张。已改为逐字前进。
+- 抓取功能对主流设计站**注定失败且不应绕过**：站酷/Dribbble 的 robots.txt 明确禁止，Unsplash 直接 403。
+  要补素材只能靠正版 API（Pixabay 免费 Key）或 AI 生图，不要试图对抗反爬。
+
+## 部署打包规则（实测结论）
+- 部署**会排除 `.env`**，因此云端拿不到 Key。解法：`server/secrets.json` + `config` 的 `pick()`
+  （优先级：真实环境变量 > secrets.json > 默认值）。
+- 部署**会包含未跟踪但存在于磁盘的文件**（secrets.json 上传后云端 `zhipu:true` 已验证），
+  但 `.gitignore` 里的 `.env` 仍被排除。所以密钥走 secrets.json 是可行的。
+- **仓库是 PUBLIC**（babawang1234/poster-app），密钥绝不能 git add。
+  `secrets.json` 已写入 `.git/info/exclude`（仅本地生效，换电脑要重新加）。
+- 运维自检：`GET /api/system/net`（需 admin）返回各 provider 配置布尔值 + 主要外部服务连通性，线上排障先用它。
+
+## 素材生成融合改造（2026-11-16）——取消独立「AI 生图」
+- 背景：AI 生图（智谱/万相）无法保证多张背景风格一致，用户放弃把它作为独立功能。
+- 新形态：Studio 第 0 步只有一个「素材生成」入口，输入一句描述，一次给齐三类候选，不再有 Tab：
+  - **矢量背景**（新）：`server/src/lib/vector-backdrop.js`，纯 SVG，8 种风格
+    （mesh/blobs/concentric/waves/memphis/grid/stripe/aurora），配色复用 design-backdrop 的
+    `pickTheme()`，同关键词+变体 → 确定性出图，成组统一。落盘到 `server/public/vector-backdrops/*.svg`。
+  - **图库实拍**：`/assets/search?skipAi=1&skipVector=1`
+  - **AI 生成**：`/inspire/ai-background`，独立异步，慢也不阻塞前两类
+- 接口：新增 `GET /api/assets/vector?q=&orientation=&count=`（**8ms 返回**，前端第一个上屏）；
+  `/assets/search` 新增 `skipAi` / `skipVector` / `withDesign` 参数，默认不再生成旧「设计底图」（canvas 栅格化太浪费）。
+- 前端：`AssetThumb` 组件统一三类卡片外观；三个独立 loading（vectorLoading / generatingAssets / aiLoading）。
+- 坑：① `layouts.js` 原本按 `stockAsset.photographer` 就给海报加 "Photo: …" 底栏，
+  矢量背景/AI 图必须排除，改为按 provider 白名单判断，否则版面被污染；
+  ② vite dev 需代理 `/vector-backdrops/` 到后端，否则本地预览 404；
+  ③ @napi-rs/canvas 可直接 `loadImage(SVG buffer)`，矢量背景能正常渲染进导出图（已验证）。

@@ -274,6 +274,7 @@ async function drawImage(ctx, layer, w, h) {
 const LOCAL_PUBLIC_DIRS = {
   'ai-images': path.resolve(__dirname, '../../public/ai-images'),
   'design-backdrops': path.resolve(__dirname, '../../public/design-backdrops'),
+  'vector-backdrops': path.resolve(__dirname, '../../public/vector-backdrops'),
   'generated': path.resolve(__dirname, '../../public/generated'),
   'templates': path.resolve(__dirname, '../../public/templates'),
   'uploads': path.resolve(__dirname, '../../public/uploads'),

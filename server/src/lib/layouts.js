@@ -80,7 +80,11 @@ export function generateLayouts({ content = {}, purpose = '', canvas, styleAnaly
     const result = stockAsset?.url
       ? photoLayout({ content, palette, width, height, artSrc, index: variantIndex, stockAsset })
       : fallbackVariants[index]({ content, palette, width, height, artSrc, index })
-    if (stockAsset?.photographer) {
+    // 只有真实图库素材需要署名（Unsplash/Pexels 等许可证要求）。
+    // 矢量背景 / AI 生成 / 设计底图是站内自有产物，加 "Photo: …" 底栏只会污染版面。
+    const needsAttribution =
+      !!stockAsset?.photographer && !['ai', 'design', 'vector', 'generation'].includes(stockAsset.provider)
+    if (needsAttribution) {
       result.layers.push({
         type: 'shape', kind: 'rect', x: 0, y: 0.963, width: 1, height: 0.037,
         color: 'rgba(0,0,0,.38)', zIndex: 89,
@@ -100,7 +104,7 @@ export function generateLayouts({ content = {}, purpose = '', canvas, styleAnaly
       canvas: { width, height },
       background: result.background,
       layers: result.layers,
-      stockAttribution: stockAsset?.photographer ? {
+      stockAttribution: needsAttribution ? {
         photographer: stockAsset.photographer,
         sourceName: stockAsset.sourceName || 'Unsplash',
         profileUrl: stockAsset.profileUrl,

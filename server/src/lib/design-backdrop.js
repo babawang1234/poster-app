@@ -121,9 +121,9 @@ const THEME_COLORS = {
   '中秋': ['#b45309', '#fde68a', '#1c1917'],
 }
 
-const DEFAULT_THEME = ['#7c5cff', '#38d9f5', '#1e1b4b']
+export const DEFAULT_THEME = ['#7c5cff', '#38d9f5', '#1e1b4b']
 
-function pickTheme(keyword) {
+export function pickTheme(keyword) {
   const q = String(keyword || '').toLowerCase()
   for (const [key, colors] of Object.entries(THEME_COLORS)) {
     if (q.includes(key)) return colors

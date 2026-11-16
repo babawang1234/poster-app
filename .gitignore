@@ -20,10 +20,15 @@ server/exports/*
 # 运行时生成的设计底图/AI图片（每次搜索/生成动态产出，不入库）
 server/public/design-backdrops/*
 server/public/ai-images/*
+server/public/vector-backdrops/*
 server/public/templates/*
 !server/public/design-backdrops/.gitkeep
 !server/public/ai-images/.gitkeep
+!server/public/vector-backdrops/.gitkeep
 !server/public/templates/.gitkeep
+
+# 图库检索的磁盘缓存（外部图片落地，可随时重建）
+server/cache/
 
 # 环境变量（禁止提交真实密钥）
 .env

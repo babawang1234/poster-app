@@ -37,6 +37,7 @@ app.use('/exports', express.static(config.exportDir))
 app.use('/templates', express.static(path.resolve(__dirname, '../public/templates')))
 app.use('/generated', express.static(path.resolve(__dirname, '../public/generated')))
 app.use('/design-backdrops', express.static(path.resolve(__dirname, '../public/design-backdrops')))
+app.use('/vector-backdrops', express.static(path.resolve(__dirname, '../public/vector-backdrops')))
 app.use('/ai-images', express.static(path.resolve(__dirname, '../public/ai-images')))
 
 app.get('/api/health', (req, res) => res.json({ ok: true, env: config.env }))
@@ -62,7 +63,7 @@ const clientDist = path.resolve(__dirname, '../../client/dist')
 if (fs.existsSync(clientDist)) {
   app.use(express.static(clientDist))
   // SPA 回退：非 API、非静态资源的路径统一返回 index.html
-  app.get(/^\/(?!api\/|uploads\/|exports\/|templates\/|generated\/|design-backdrops\/|ai-images\/).*/, (req, res) => {
+  app.get(/^\/(?!api\/|uploads\/|exports\/|templates\/|generated\/|design-backdrops\/|vector-backdrops\/|ai-images\/).*/, (req, res) => {
     res.sendFile(path.join(clientDist, 'index.html'))
   })
 }

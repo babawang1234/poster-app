@@ -32,6 +32,11 @@ export default defineConfig({
         target: 'http://localhost:4000',
         changeOrigin: true,
       },
+      // 矢量背景（SVG）：开发模式下由后端生成并落盘，需代理到后端
+      '/vector-backdrops/': {
+        target: 'http://localhost:4000',
+        changeOrigin: true,
+      },
       '/ai-images/': {
         target: 'http://localhost:4000',
         changeOrigin: true,

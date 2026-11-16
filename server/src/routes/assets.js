@@ -7,12 +7,54 @@ import { generateDesignBackdrops } from '../lib/design-backdrop.js'
 import { encodeBufferToDataUrl } from '../lib/renderer.js'
 import { getCachedGeneration, setCachedGeneration } from '../lib/gen-cache.js'
 import { scrapeImages, scraperStatus, ScrapeError, validateTarget } from '../lib/scraper.js'
+import { generateVectorBackdrops } from '../lib/vector-backdrop.js'
 import path from 'path'
 import fs from 'fs'
+import { fileURLToPath } from 'url'
 import { genId } from '../lib/util.js'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 const router = Router()
 router.use(authRequired)
+
+const VECTOR_DIR = path.resolve(__dirname, '../../public/vector-backdrops')
+
+/**
+ * 生成矢量背景并落盘，返回可直接给 <img> 用的站内路径。
+ * 落盘而非内联 data URL：路径短（存进项目/图层不膨胀数据库）、可被浏览器与 CDN 缓存。
+ */
+function persistVectorBackdrops(keyword, { count = 6, width = 2160, height = 2880 } = {}) {
+  const items = generateVectorBackdrops(keyword, { count, width, height })
+  try {
+    fs.mkdirSync(VECTOR_DIR, { recursive: true })
+  } catch {}
+  return items.map((v) => {
+    const url = `/vector-backdrops/${v.id}.svg`
+    const file = path.join(VECTOR_DIR, `${v.id}.svg`)
+    try {
+      if (!fs.existsSync(file)) fs.writeFileSync(file, v.svg, 'utf8')
+    } catch (e) {
+      console.warn('[assets] 矢量背景落盘失败：', e.message)
+    }
+    return {
+      id: v.id,
+      provider: 'vector',
+      sourceName: '矢量背景',
+      style: v.style,
+      styleName: v.styleName,
+      description: v.description,
+      colors: v.colors,
+      width: v.width,
+      height: v.height,
+      url,
+      thumb: url,
+      photographer: '幻象工坊 · 矢量引擎',
+      license: '矢量背景 · 可商用 · 无损缩放',
+      kind: 'vector',
+    }
+  })
+}
 
 // 图库可用状态：前端据此提前展示引导，而不是让用户搜索后报错
 router.get('/status', asyncHandler(async (req, res) => {
@@ -31,6 +73,8 @@ router.get('/search', asyncHandler(async (req, res) => {
   const originalQuery = String(req.query.original || '').trim().slice(0, 160)
   const orientation = ['landscape', 'portrait', 'squarish'].includes(req.query.orientation) ? req.query.orientation : undefined
   const limit = Math.min(48, Math.max(12, Number(req.query.limit) || 36))
+  // skipAi=1：素材融合模式下 AI 由前端并行单独发起，这里跳过以免把整体响应拖到 30 秒以上
+  const skipAi = req.query.skipAi === '1'
   const result = await searchAssetImages({ query, originalQuery, orientation, perPage: limit })
 
   // 关键兜底：图库 + 本地池都无命中时（aiFallback），用真实 AI 生图按关键词生成贴题图，
@@ -41,7 +85,7 @@ router.get('/search', asyncHandler(async (req, res) => {
   //   2) 智谱 CogView-3-Flash（免费、中文理解强、一次真出多张不同图）
   //   3) Pollinations 兜底（无 Key 时，1 真图 + 像素变体）
   let aiGeneratedPhotos = []
-  if (result.aiFallback && result.photos.length === 0) {
+  if (!skipAi && result.aiFallback && result.photos.length === 0) {
     try {
       const { keywordToImagePrompt } = await import('../lib/image-prompt.js')
       const prompt = keywordToImagePrompt(query)
@@ -114,39 +158,71 @@ router.get('/search', asyncHandler(async (req, res) => {
     }
   }
 
-  // 生成"设计底图"（虚拟背景）：摄影图之外，再给用户提供设计感的抽象背景
+  // 「设计底图」已被矢量背景取代：canvas 栅格化既慢又比 SVG 更重，仅保留 withDesign=1 的兼容开关，
+  // 默认不再生成，避免每次检索都白白占用 CPU 与响应体积。
   let designBackdrops = []
-  try {
-    const count = 6
-    const backdrops = generateDesignBackdrops(query, { count })
-    designBackdrops = backdrops.map((b) => {
-      const dataUrl = encodeBufferToDataUrl(b.buffer, 'image/png')
-      return {
-        id: b.id,
-        provider: 'design',
-        sourceName: '设计底图',
-        description: b.description,
-        url: dataUrl,
-        thumb: dataUrl,
-        photographer: '幻象工坊 · 设计库',
-        license: '设计底图 · 可商用',
-        kind: 'design',
-        width: b.width,
-        height: b.height,
-      }
-    })
-  } catch (e) {
-    console.warn('[assets] 设计底图生成失败：', e.message)
+  if (req.query.withDesign === '1') {
+    try {
+      const count = 6
+      const backdrops = generateDesignBackdrops(query, { count })
+      designBackdrops = backdrops.map((b) => {
+        const dataUrl = encodeBufferToDataUrl(b.buffer, 'image/png')
+        return {
+          id: b.id,
+          provider: 'design',
+          sourceName: '设计底图',
+          description: b.description,
+          url: dataUrl,
+          thumb: dataUrl,
+          photographer: '幻象工坊 · 设计库',
+          license: '设计底图 · 可商用',
+          kind: 'design',
+          width: b.width,
+          height: b.height,
+        }
+      })
+    } catch (e) {
+      console.warn('[assets] 设计底图生成失败：', e.message)
+    }
   }
 
   const photos = [...result.photos, ...aiGeneratedPhotos]
+
+  // 矢量背景：与图库检索同步返回，前端一次性拿到「实拍 + 矢量」两类候选。
+  // 矢量图可控配色、成组统一，是不依赖生图模型的稳定底图来源。
+  let vectors = []
+  if (req.query.skipVector !== '1') {
+    const [vw, vh] =
+      orientation === 'landscape' ? [2880, 2160] : orientation === 'squarish' ? [2400, 2400] : [2160, 2880]
+    try {
+      vectors = persistVectorBackdrops(query, { count: Number(req.query.vectorCount) || 6, width: vw, height: vh })
+    } catch (e) {
+      console.warn('[assets] 矢量背景生成失败：', e.message)
+    }
+  }
+
   res.json({
     ...result,
     photos,
     aiFallback: !!aiGeneratedPhotos.length,
-    message: photos.length ? '' : result.message,
+    message: photos.length || vectors.length ? '' : result.message,
     designBackdrops,
+    vectors,
   })
+}))
+
+// 单独获取矢量背景：毫秒级返回，前端可让它先于图库检索上屏，避免用户干等外部图库
+router.get('/vector', asyncHandler(async (req, res) => {
+  const query = String(req.query.q || '').trim().slice(0, 100)
+  if (!query) return res.json({ vectors: [] })
+  const orientation = ['landscape', 'portrait', 'squarish'].includes(req.query.orientation)
+    ? req.query.orientation
+    : 'portrait'
+  const count = Math.min(12, Math.max(2, Number(req.query.count) || 6))
+  const [vw, vh] =
+    orientation === 'landscape' ? [2880, 2160] : orientation === 'squarish' ? [2400, 2400] : [2160, 2880]
+  const vectors = persistVectorBackdrops(query, { count, width: vw, height: vh })
+  res.json({ vectors })
 }))
 
 // 单独获取"设计底图"（虚拟背景）——供「设计底图」Tab 使用
