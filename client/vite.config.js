@@ -3,6 +3,13 @@ import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   plugins: [react()],
+  // 构建产物直接输出到 server/public/app（普通静态资源目录）。
+  // 原因：云端发布工具会排除 dist/build 这类 build output，导致重新发布时
+  // 沙箱复用旧前端。放在 public/app 下可随源码一起上传，后端直接托管。
+  build: {
+    outDir: '../server/public/app',
+    emptyOutDir: true,
+  },
   // Keep React and React DOM on one module instance in the npm-workspace dev server.
   // This also avoids invalid-hook-call failures when the optimizer cache is stale.
   resolve: {

@@ -57,9 +57,11 @@ app.use('/api/assets', assetRoutes)
 app.use('/api/inspire', inspireRoutes)
 app.use('/api/system', systemRoutes)
 
-// 生产/云端部署：托管前端构建产物，实现「单端口」运行
-// 本地开发时 client/dist 不存在，这段自动跳过，仍走 Vite 开发服务器
-const clientDist = path.resolve(__dirname, '../../client/dist')
+// 生产/云端部署：托管前端构建产物，实现「单端口」运行。
+// 产物放在 server/public/app（而非 client/dist）：云端发布工具会忽略 dist/build 目录，
+// 放在普通静态资源目录下才能随源码上传，避免重新发布后线上仍是旧前端。
+// 本地开发时该目录尚未构建，这段自动跳过，仍走 Vite 开发服务器。
+const clientDist = path.resolve(__dirname, '../public/app')
 if (fs.existsSync(clientDist)) {
   app.use(express.static(clientDist))
   // SPA 回退：非 API、非静态资源的路径统一返回 index.html
