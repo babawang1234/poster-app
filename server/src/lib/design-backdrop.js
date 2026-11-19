@@ -186,216 +186,320 @@ function shiftHue(hex, deg) {
   return `#${[nr, ng, nb].map((c) => Math.round(c * 255).toString(16).padStart(2, '0')).join('')}`
 }
 
+// ============================================================================
+// 设计底图引擎 v2 —— 方法论来源（已检索并提炼自 GitHub 开源设计 Skill）：
+//   · anthropics/skills / canvas-design  —— 先确立「视觉哲学」再表达；严格有限配色、
+//     大量负空间、精确边距、系统性极简标记、纸纹质感、元素绝不溢出画布。
+//   · anthropics/skills / algorithmic-art —— 种子随机（seeded randomness）、多八度噪声场、
+//     流场粒子轨迹、密度累积、参数化受控混沌；颜色由密度/速度涌现。
+// 落地为纯服务端、零外部依赖、确定性可复现的程序化设计引擎：
+//   同一「关键词 + variant」永远出同一张图（成组统一），不同 variant 有真实差异，
+//   且每张都强制预留标题安全区，直接可用作海报底图。
+// ============================================================================
+
+// —— 种子随机（algorithmic-art 的可复现性要求）——
+function hash32(str) {
+  let h = 2166136261 >>> 0
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i)
+    h = Math.imul(h, 16777619) >>> 0
+  }
+  return h >>> 0
+}
+function mulberry32(seed) {
+  let a = seed >>> 0
+  return () => {
+    a = (a + 0x6D2B79F5) >>> 0
+    let t = Math.imul(a ^ (a >>> 15), 1 | a)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+// 二维值噪声 + 多八度叠加（fbm）：产生湍流区与静区，而非均匀随机噪点
+const noiseLattice = (ix, iy, seed) => {
+  let n = Math.imul(ix, 374761393) + Math.imul(iy, 668265263) + Math.imul(seed, 1442695041)
+  n = Math.imul(n ^ (n >>> 13), 1274126177)
+  return ((n ^ (n >>> 16)) >>> 0) / 4294967296
+}
+function valueNoise(x, y, seed) {
+  const ix = Math.floor(x), iy = Math.floor(y)
+  const fx = x - ix, fy = y - iy
+  const sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy)
+  const a = noiseLattice(ix, iy, seed), b = noiseLattice(ix + 1, iy, seed)
+  const c = noiseLattice(ix, iy + 1, seed), d = noiseLattice(ix + 1, iy + 1, seed)
+  return (a + (b - a) * sx) * (1 - sy) + (c + (d - c) * sx) * sy
+}
+function fbm(x, y, seed, octaves = 4) {
+  let sum = 0, amp = 0.5, freq = 1
+  for (let i = 0; i < octaves; i++) {
+    sum += valueNoise(x * freq, y * freq, seed + i * 977) * amp
+    amp *= 0.5
+    freq *= 2
+  }
+  return sum
+}
+
+// —— 视觉哲学：由关键词语义 + variant 共同决定构成语汇，而非套固定模板 ——
+// 每套哲学 = 有限配色 + 形状语汇 + 留白比例 + 运动参数。
+const PHILOSOPHIES = [
+  { key: 'organic', name: 'Organic Systems', tests: /环保|自然|森林|山|水|海洋|生态|绿|春|花|茶|植物|旅行|风景/u, vocab: 'flow', safe: 0.42 },
+  { key: 'silence', name: 'Geometric Silence', tests: /科技|AI|人工智能|数字|数据|代码|芯片|智能|建筑|城市/u, vocab: 'grid', safe: 0.46 },
+  { key: 'meditation', name: 'Analog Meditation', tests: /咖啡|美食|餐饮|书|阅读|教育|烘焙|甜|面包|火锅/u, vocab: 'diffuse', safe: 0.50 },
+  { key: 'chromatic', name: 'Chromatic Language', tests: /情人节|爱情|玫瑰|浪漫|春节|新年|节日|婚|中秋|国风|艺术|设计/u, vocab: 'fields', safe: 0.44 },
+  { key: 'concrete', name: 'Concrete Poetry', tests: /金融|商务|招聘|企业|办公|房产|理财|工业|工厂|制造|汽车/u, vocab: 'blocks', safe: 0.48 },
+  { key: 'harmonics', name: 'Quantum Harmonics', tests: /音乐|演唱会|运动|健身|马拉松|跑步|节|庆典/u, vocab: 'contours', safe: 0.45 },
+]
+function derivePhilosophy(keyword, variant, rng, philosophyIndex) {
+  const q = String(keyword || '')
+  const matched = PHILOSOPHIES.filter((p) => p.tests.test(q))
+  // philosophyIndex：一键成片可为同批的每张图强制指定不同哲学，保证视觉差异极大；
+  // 未指定时命中语义优先，否则按 variant 在 6 套之间轮换。
+  const base = Number.isInteger(philosophyIndex)
+    ? PHILOSOPHIES[philosophyIndex % PHILOSOPHIES.length]
+    : (matched.length ? matched[variant % matched.length] : PHILOSOPHIES[variant % PHILOSOPHIES.length])
+  return {
+    ...base,
+    // 受控混沌：密度/尺度/旋转都由种子决定，同一 variant 稳定复现
+    density: 0.75 + rng() * 0.5,
+    scale: 0.9 + rng() * 0.7,
+    rotation: (rng() - 0.5) * 0.8,
+    accent: rng() > 0.5 ? 0 : 1,
+  }
+}
+
 // 生成一张"设计底图"PNG，返回 Buffer。
-// 用 variant 切换 8 种差异明显的高级设计风格；配色再按 variant 做温和色相偏移，
-// 让「同一关键词生成 8 张」彼此可辨，而不是 8 张同色系近似图。
-export function renderDesignBackdrop({ keyword, width = 1080, height = 1440, variant = 0 }) {
+export function renderDesignBackdrop({ keyword, width = 1080, height = 1440, variant = 0, philosophyIndex }) {
   const [t1, t2, t3] = pickTheme(keyword)
-  const style = variant % 8
-  // 色相偏移控制在 ±24° 以内，既保持主题识别度，又能拉开区分
-  const rot = (style - 3.5) * 7
+  const seed = hash32(`${keyword}|${variant}|${philosophyIndex ?? 'auto'}`)
+  const rng = mulberry32(seed)
+  const ph = derivePhilosophy(keyword, variant, rng, philosophyIndex)
+  // 有限配色：主题 3 色 + 温和色相偏移（±20° 内），绝不引入第四种随机色
+  const rot = ((variant % 5) - 2) * 5
   const c1 = shiftHue(t1, rot)
   const c2 = shiftHue(t2, rot * 0.6)
   const c3 = t3
   const canvas = createCanvas(width, height)
   const ctx = canvas.getContext('2d')
 
-  switch (style) {
-    case 0: renderFluidGradient(ctx, width, height, c1, c2, c3); break
-    case 1: renderMemphis(ctx, width, height, c1, c2, c3); break
-    case 2: renderDiffuseGlow(ctx, width, height, c1, c2, c3); break
-    case 3: renderGeometric(ctx, width, height, c1, c2, c3); break
-    case 4: renderDiagonal(ctx, width, height, c1, c2, c3); break
-    case 5: renderConcentric(ctx, width, height, c1, c2, c3); break
-    case 6: renderDuotone(ctx, width, height, c1, c2, c3); break
-    case 7: renderAurora(ctx, width, height, c1, c2, c3); break
+  // 1) 底色：深色基底 + 极缓的垂直明度渐变，避免死板的纯色填充
+  const bg = ctx.createLinearGradient(0, 0, width * 0.35, height)
+  bg.addColorStop(0, c3)
+  bg.addColorStop(1, lerpColor(c3, '#000000', 0.18))
+  ctx.fillStyle = bg
+  ctx.fillRect(0, 0, width, height)
+
+  // 2) 主体构成语汇
+  switch (ph.vocab) {
+    case 'flow': renderFlowField(ctx, width, height, c1, c2, ph, seed); break
+    case 'grid': renderSwissGrid(ctx, width, height, c1, c2, ph, rng); break
+    case 'diffuse': renderChromaticDiffuse(ctx, width, height, c1, c2, ph, rng); break
+    case 'fields': renderColorFields(ctx, width, height, c1, c2, ph, rng); break
+    case 'blocks': renderMonolith(ctx, width, height, c1, c2, ph, rng); break
+    default: renderContours(ctx, width, height, c1, c2, ph, seed); break
   }
 
-  // 统一叠加细微噪点，增加质感
-  addGrain(ctx, width, height, 0.035)
+  // 3) 强制标题安全区：海报文字主要落在中下部，用柔和暗场把该区域的对比度压下来，
+  //    让底图"设计感强"但"不抢文字"——这是"底图不精准"的关键修正。
+  renderSafeArea(ctx, width, height, ph.safe, c3)
+
+  // 4) 系统性极简标记（canvas-design：sparse clinical typography / systematic markers）
+  renderSystemMarks(ctx, width, height, variant, ph.name, rng)
+
+  // 5) 确定性纸纹颗粒（不再用 Math.random，保证可复现）
+  addGrain(ctx, width, height, 0.05, rng)
 
   return canvas.toBuffer('image/png')
 }
 
-// —— 8 种设计风格 ——
-
-// 0 流体渐变：多层柔和径向光晕，高级弥散
-function renderFluidGradient(ctx, w, h, c1, c2, c3) {
-  ctx.fillStyle = c3
-  ctx.fillRect(0, 0, w, h)
-  const blobs = [
-    { x: 0.28, y: 0.24, r: 0.75, c: c1, a: 0.9 },
-    { x: 0.76, y: 0.42, r: 0.7, c: c2, a: 0.7 },
-    { x: 0.35, y: 0.78, r: 0.7, c: lerpColor(c1, c2, 0.4), a: 0.65 },
-    { x: 0.72, y: 0.85, r: 0.5, c: c1, a: 0.4 },
-  ]
-  for (const b of blobs) {
-    const r = Math.max(w, h) * b.r
-    const g = ctx.createRadialGradient(w * b.x, h * b.y, 0, w * b.x, h * b.y, r)
-    g.addColorStop(0, rgba(b.c, b.a))
-    g.addColorStop(1, rgba(b.c, 0))
-    ctx.fillStyle = g
-    ctx.fillRect(0, 0, w, h)
-  }
-}
-
-// 1 孟菲斯拼贴：色块 + 圆点 + 三角 + 曲线，活泼设计感
-function renderMemphis(ctx, w, h, c1, c2, c3) {
-  ctx.fillStyle = c3
-  ctx.fillRect(0, 0, w, h)
-  // 大色块
-  ctx.fillStyle = rgba(c1, 0.9)
-  ctx.fillRect(0, 0, w * 0.42, h * 0.55)
-  ctx.fillStyle = rgba(c2, 0.75)
-  ctx.fillRect(w * 0.62, h * 0.18, w * 0.38, h * 0.4)
-  // 圆点
-  for (const [px, py, pr, pc] of [
-    [0.55, 0.12, 0.06, c1], [0.85, 0.08, 0.035, '#ffffff'],
-    [0.18, 0.68, 0.05, c2], [0.48, 0.82, 0.04, '#ffffff'],
-  ]) {
-    ctx.beginPath(); ctx.arc(w * px, h * py, w * pr, 0, Math.PI * 2)
-    ctx.fillStyle = rgba(pc, 0.9); ctx.fill()
-  }
-  // 波浪曲线
-  ctx.strokeStyle = rgba('#ffffff', 0.7)
-  ctx.lineWidth = Math.max(4, w * 0.01)
-  ctx.beginPath()
-  for (let x = 0; x <= w; x += 8) ctx.lineTo(x, h * 0.7 + Math.sin(x / 90) * h * 0.06)
-  ctx.stroke()
-  // 三角
-  ctx.fillStyle = rgba(c1, 0.85)
-  ctx.beginPath(); ctx.moveTo(w * 0.8, h * 0.7); ctx.lineTo(w * 0.98, h * 0.7); ctx.lineTo(w * 0.89, h * 0.5); ctx.closePath(); ctx.fill()
-}
-
-// 2 弥散光晕：大面积柔和光斑，梦幻
-function renderDiffuseGlow(ctx, w, h, c1, c2, c3) {
-  ctx.fillStyle = c3
-  ctx.fillRect(0, 0, w, h)
-  const glows = [
-    { x: 0.5, y: 0.35, r: 0.9, c: c1, a: 0.55 },
-    { x: 0.2, y: 0.7, r: 0.6, c: c2, a: 0.4 },
-    { x: 0.82, y: 0.65, r: 0.55, c: c1, a: 0.35 },
-    { x: 0.45, y: 0.15, r: 0.5, c: c2, a: 0.3 },
-  ]
-  for (const g of glows) {
-    const r = Math.max(w, h) * g.r
-    const gr = ctx.createRadialGradient(w * g.x, h * g.y, 0, w * g.x, h * g.y, r)
-    gr.addColorStop(0, rgba(g.c, g.a))
-    gr.addColorStop(1, rgba(g.c, 0))
-    ctx.fillStyle = gr; ctx.fillRect(0, 0, w, h)
-  }
-}
-
-// 3 几何构图：大圆环 + 交叠矩形 + 对角线
-function renderGeometric(ctx, w, h, c1, c2, c3) {
-  ctx.fillStyle = c3
-  ctx.fillRect(0, 0, w, h)
-  // 同心圆环
-  for (let i = 0; i < 5; i++) {
-    const r = h * (0.14 + i * 0.1)
-    ctx.beginPath(); ctx.arc(w * 0.5, h * 0.42, r, 0, Math.PI * 2)
-    ctx.strokeStyle = rgba(i % 2 ? c1 : c2, 0.5 - i * 0.07)
-    ctx.lineWidth = 2 + i * 1.2
-    ctx.stroke()
-  }
-  // 交叠半透明矩形
-  ctx.globalAlpha = 0.5
-  ctx.fillStyle = c1
-  ctx.fillRect(w * 0.08, h * 0.6, w * 0.3, h * 0.28)
-  ctx.globalAlpha = 0.4
-  ctx.fillStyle = c2
-  ctx.fillRect(w * 0.28, h * 0.68, w * 0.32, h * 0.28)
-  ctx.globalAlpha = 1
-  // 对角线
-  ctx.strokeStyle = rgba('#ffffff', 0.2); ctx.lineWidth = w * 0.006
-  ctx.beginPath(); ctx.moveTo(0, h * 0.85); ctx.lineTo(w, h * 0.45); ctx.stroke()
-}
-
-// 4 对角分割 + 斜纹
-function renderDiagonal(ctx, w, h, c1, c2, c3) {
-  ctx.fillStyle = c3; ctx.fillRect(0, 0, w, h)
-  ctx.save()
-  ctx.rotate(-0.35)
-  ctx.fillStyle = c1
-  ctx.fillRect(-w * 0.3, h * 0.1, w * 1.4, h * 0.3)
-  ctx.fillStyle = c2
-  ctx.fillRect(-w * 0.3, h * 0.55, w * 1.4, h * 0.28)
-  ctx.restore()
-  // 细斜纹
-  ctx.save(); ctx.globalAlpha = 0.15; ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2
-  for (let x = -h; x < w + h; x += 40) {
-    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x + h, h); ctx.stroke()
-  }
-  ctx.restore()
-}
-
-// 5 同心圆射线：从中心扩散的弧线，科技感
-function renderConcentric(ctx, w, h, c1, c2, c3) {
-  ctx.fillStyle = c3; ctx.fillRect(0, 0, w, h)
-  const cx = w * 0.5, cy = h * 0.42
-  for (let i = 0; i < 14; i++) {
-    const r = 20 + i * (Math.max(w, h) * 0.045)
-    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2)
-    ctx.strokeStyle = rgba(i % 2 ? c1 : c2, Math.max(0.12, 0.55 - i * 0.03))
-    ctx.lineWidth = 1.5 + (i % 3)
-    ctx.stroke()
-  }
-  // 中心光点
-  const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, w * 0.3)
-  g.addColorStop(0, rgba(c1, 0.7)); g.addColorStop(1, rgba(c1, 0))
-  ctx.fillStyle = g; ctx.fillRect(0, 0, w, h)
-}
-
-// 6 双色调：上下两个大色域硬切 + 过渡带
-function renderDuotone(ctx, w, h, c1, c2, c3) {
-  ctx.fillStyle = c3; ctx.fillRect(0, 0, w, h)
-  const g = ctx.createLinearGradient(0, 0, w, h)
-  g.addColorStop(0, c1); g.addColorStop(0.5, lerpColor(c1, c2, 0.5)); g.addColorStop(1, c3)
-  ctx.fillStyle = g; ctx.fillRect(0, 0, w, h)
-  // 半透明圆形叠加
-  ctx.globalAlpha = 0.3
-  ctx.fillStyle = '#ffffff'
-  ctx.beginPath(); ctx.arc(w * 0.72, h * 0.3, w * 0.28, 0, Math.PI * 2); ctx.fill()
-  ctx.globalAlpha = 0.22
-  ctx.beginPath(); ctx.arc(w * 0.25, h * 0.72, w * 0.24, 0, Math.PI * 2); ctx.fill()
-  ctx.globalAlpha = 1
-}
-
-// 7 极光：多层弯曲色带，梦幻流线
-function renderAurora(ctx, w, h, c1, c2, c3) {
-  ctx.fillStyle = c3; ctx.fillRect(0, 0, w, h)
-  for (let band = 0; band < 4; band++) {
-    const yBase = h * (0.2 + band * 0.18)
+// —— 语汇 1：流场粒子轨迹（algorithmic-art 的 flow field / density accumulation）——
+function renderFlowField(ctx, w, h, c1, c2, ph, seed) {
+  const particles = Math.round(420 * ph.density)
+  const steps = 42
+  ctx.lineCap = 'round'
+  for (let p = 0; p < particles; p++) {
+    let x = (p / particles) * w + (noiseLattice(p, 7, seed) - 0.5) * w * 0.12
+    let y = noiseLattice(p, 19, seed) * h
     ctx.beginPath()
-    for (let x = 0; x <= w; x += 6) {
-      const y = yBase + Math.sin(x / (140 + band * 30) + band * 1.5) * h * 0.06
+    ctx.moveTo(x, y)
+    for (let s = 0; s < steps; s++) {
+      // 多八度噪声驱动方向，产生湍流带与静区的对比
+      const n = fbm(x / (w * 0.28 * ph.scale), y / (h * 0.28 * ph.scale), seed, 3)
+      const angle = n * Math.PI * 4 + ph.rotation
+      x += Math.cos(angle) * (w * 0.011)
+      y += Math.sin(angle) * (h * 0.009)
+      if (x < 0 || x > w || y < 0 || y > h) break
+      ctx.lineTo(x, y)
+    }
+    // 颜色随粒子序号在 2 色间交替，透明度低 → 密度累积出层次
+    ctx.strokeStyle = rgba(p % 3 === 0 ? c2 : c1, 0.10 + (p % 5) * 0.014)
+    ctx.lineWidth = 0.7 + (p % 7) * 0.18
+    ctx.stroke()
+  }
+  // 一处聚焦光晕，作为视觉锚点（构图重心）
+  const gx = w * (0.3 + ph.accent * 0.4), gy = h * 0.34
+  const g = ctx.createRadialGradient(gx, gy, 0, gx, gy, w * 0.55)
+  g.addColorStop(0, rgba(c1, 0.30))
+  g.addColorStop(1, rgba(c1, 0))
+  ctx.fillStyle = g
+  ctx.fillRect(0, 0, w, h)
+}
+
+// —— 语汇 2：瑞士网格 + 精确刻度（Geometric Silence）——
+function renderSwissGrid(ctx, w, h, c1, c2, ph, rng) {
+  const cols = 8, rows = 11
+  const m = w * 0.075
+  const cw = (w - m * 2) / cols, ch = (h - m * 2) / rows
+  // 极细网格线：秩序感，而非装饰
+  ctx.strokeStyle = rgba('#ffffff', 0.055)
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  for (let i = 0; i <= cols; i++) { ctx.moveTo(m + i * cw, m); ctx.lineTo(m + i * cw, h - m) }
+  for (let j = 0; j <= rows; j++) { ctx.moveTo(m, m + j * ch); ctx.lineTo(w - m, m + j * ch) }
+  ctx.stroke()
+  // 少量色块（严格对齐网格交点），体现「有限信息、精确放置」
+  const blockCount = 5 + Math.floor(rng() * 3)
+  for (let i = 0; i < blockCount; i++) {
+    const cx = m + Math.floor(rng() * cols) * cw
+    const cy = m + Math.floor(rng() * rows) * ch
+    const bw = cw * (1 + Math.floor(rng() * 2))
+    const bh = ch * (1 + Math.floor(rng() * 3))
+    ctx.fillStyle = rgba(i % 2 ? c1 : c2, 0.12 + rng() * 0.18)
+    ctx.fillRect(cx, cy, Math.min(bw, w - m - cx), Math.min(bh, h - m - cy))
+  }
+  // 节点圆环：科学图谱语言
+  ctx.strokeStyle = rgba(c1, 0.5)
+  for (let i = 0; i < 9; i++) {
+    const nx = m + Math.floor(rng() * (cols + 1)) * cw
+    const ny = m + Math.floor(rng() * (rows + 1)) * ch
+    ctx.beginPath(); ctx.arc(nx, ny, 2 + rng() * 4, 0, Math.PI * 2); ctx.lineWidth = 1.2; ctx.stroke()
+  }
+}
+
+// —— 语汇 3：弥散光域 + 大留白（Analog Meditation）——
+function renderChromaticDiffuse(ctx, w, h, c1, c2, ph, rng) {
+  const glows = [
+    { x: 0.28, y: 0.26, r: 0.85, c: c1, a: 0.55 },
+    { x: 0.78, y: 0.18, r: 0.60, c: c2, a: 0.38 },
+    { x: 0.62, y: 0.72, r: 0.70, c: c1, a: 0.26 },
+  ]
+  for (const g0 of glows) {
+    const r = Math.max(w, h) * g0.r * ph.scale
+    const g = ctx.createRadialGradient(w * g0.x, h * g0.y, 0, w * g0.x, h * g0.y, r)
+    g.addColorStop(0, rgba(g0.c, g0.a))
+    g.addColorStop(0.55, rgba(g0.c, g0.a * 0.35))
+    g.addColorStop(1, rgba(g0.c, 0))
+    ctx.fillStyle = g; ctx.fillRect(0, 0, w, h)
+  }
+  // 一条极细的水平分割线：纸本印刷的克制感
+  ctx.strokeStyle = rgba('#ffffff', 0.12); ctx.lineWidth = 1
+  ctx.beginPath(); ctx.moveTo(w * 0.12, h * 0.62); ctx.lineTo(w * 0.88, h * 0.62); ctx.stroke()
+}
+
+// —— 语汇 4：Albers 式色域交互（Chromatic Language）——
+function renderColorFields(ctx, w, h, c1, c2, ph, rng) {
+  const m = w * 0.09
+  const bands = 4
+  for (let i = 0; i < bands; i++) {
+    const x = m + (i * (w - m * 2)) / bands
+    const bw = (w - m * 2) / bands
+    const mix = i / (bands - 1)
+    const col = lerpColor(c1, c2, mix)
+    ctx.fillStyle = rgba(col, 0.20 + 0.18 * mix)
+    ctx.fillRect(x, m + h * (0.08 + 0.05 * i), bw, h * (0.52 - 0.06 * i))
+  }
+  // 内嵌矩形：色彩相互作用产生深度
+  ctx.fillStyle = rgba(c1, 0.30)
+  ctx.fillRect(w * 0.28, h * 0.30, w * 0.44, h * 0.20)
+  ctx.fillStyle = rgba('#ffffff', 0.06)
+  ctx.fillRect(w * 0.36, h * 0.35, w * 0.28, h * 0.10)
+}
+
+// —— 语汇 5：纪念碑式色块（Concrete Poetry）——
+function renderMonolith(ctx, w, h, c1, c2, ph, rng) {
+  const m = w * 0.08
+  ctx.fillStyle = rgba(c1, 0.55)
+  ctx.fillRect(m, h * 0.10, w * 0.30, h * 0.46)
+  ctx.fillStyle = rgba(c2, 0.32)
+  ctx.fillRect(m + w * 0.30, h * 0.22, w * 0.62 - m, h * 0.26)
+  ctx.fillStyle = rgba('#ffffff', 0.05)
+  ctx.fillRect(w * 0.62, h * 0.10, w * 0.30, h * 0.08)
+  // 硬边细线强调结构
+  ctx.strokeStyle = rgba('#ffffff', 0.18); ctx.lineWidth = 1.5
+  ctx.beginPath(); ctx.moveTo(m, h * 0.56); ctx.lineTo(w - m, h * 0.56); ctx.stroke()
+}
+
+// —— 语汇 6：等值线地形（Quantum Harmonics 的干涉图样）——
+function renderContours(ctx, w, h, c1, c2, ph, seed) {
+  const lines = 22
+  for (let i = 0; i < lines; i++) {
+    const baseY = h * (0.10 + (i / lines) * 0.66)
+    ctx.beginPath()
+    for (let x = 0; x <= w; x += 8) {
+      const n = fbm(x / (w * 0.16 * ph.scale), (i + 1) * 0.32, seed, 3)
+      const y = baseY + (n - 0.5) * h * 0.14 * (1 + i * 0.02)
       x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)
     }
-    ctx.strokeStyle = rgba(band % 2 ? c1 : c2, 0.5 - band * 0.09)
-    ctx.lineWidth = 18 - band * 2
+    ctx.strokeStyle = rgba(i % 3 === 0 ? c2 : c1, 0.10 + (i % 6) * 0.022)
+    ctx.lineWidth = 0.9 + (i % 4) * 0.35
     ctx.stroke()
   }
 }
 
-// 噪点纹理
-function addGrain(ctx, w, h, alpha) {
+// 标题安全区：中下部柔和压暗，保证叠字可读（不是硬遮罩，保留底图纹理）
+function renderSafeArea(ctx, w, h, strength, c3) {
+  const g = ctx.createLinearGradient(0, h * 0.34, 0, h)
+  g.addColorStop(0, rgba(c3, 0))
+  g.addColorStop(0.55, rgba(c3, strength * 0.55))
+  g.addColorStop(1, rgba('#000000', strength * 0.72))
+  ctx.fillStyle = g
+  ctx.fillRect(0, h * 0.34, w, h * 0.66)
+}
+
+// 系统性极简标记：角标编号 + 细刻度，克制且不越界
+function renderSystemMarks(ctx, w, h, variant, label, rng) {
+  const m = w * 0.075
+  ctx.strokeStyle = rgba('#ffffff', 0.18)
+  ctx.lineWidth = 1
+  // 左上短刻度
+  ctx.beginPath(); ctx.moveTo(m, m); ctx.lineTo(m + w * 0.06, m); ctx.stroke()
+  ctx.beginPath(); ctx.moveTo(m, m); ctx.lineTo(m, m + w * 0.06); ctx.stroke()
+  // 右下角对齐线
+  ctx.beginPath(); ctx.moveTo(w - m, h - m); ctx.lineTo(w - m - w * 0.06, h - m); ctx.stroke()
+  // 侧边一排细刻度（科学图谱感）
+  for (let i = 0; i < 12; i++) {
+    const y = m + (i / 12) * (h - m * 2)
+    const len = i % 4 === 0 ? w * 0.018 : w * 0.008
+    ctx.beginPath(); ctx.moveTo(w - m, y); ctx.lineTo(w - m - len, y); ctx.stroke()
+  }
+  // 极简编号（ASCII，避免中文字体依赖）；字体不可用时静默跳过，不影响整张底图
+  try {
+    ctx.fillStyle = rgba('#ffffff', 0.30)
+    ctx.font = `${Math.max(10, Math.round(w * 0.012))}px sans-serif`
+    ctx.fillText(`PLATE ${String(variant + 1).padStart(2, '0')}`, m + 2, h - m - 10)
+  } catch { /* 云端字体缺失时仅省略编号 */ }
+}
+
+// 确定性纸纹颗粒
+function addGrain(ctx, w, h, alpha, rng) {
   ctx.globalAlpha = alpha
-  for (let i = 0; i < 500; i++) {
-    ctx.fillStyle = Math.random() > 0.5 ? '#ffffff' : '#000000'
-    ctx.fillRect(Math.random() * w, Math.random() * h, 1.5, 1.5)
+  for (let i = 0; i < 900; i++) {
+    ctx.fillStyle = rng() > 0.5 ? '#ffffff' : '#000000'
+    ctx.fillRect(rng() * w, rng() * h, 1.2, 1.2)
   }
   ctx.globalAlpha = 1
 }
 
 // 生成多张设计底图（不同 variant）
 // variantOffset 用于让不同请求拿到不同的起始风格（一键成片等单图场景可随机化）
-export function generateDesignBackdrops(keyword, { count = 4, width = 1080, height = 1440, variantOffset = 0 } = {}) {
+export function generateDesignBackdrops(keyword, { count = 4, width = 1080, height = 1440, variantOffset = 0, distinct = false } = {}) {
   const backdrops = []
   for (let i = 0; i < count; i++) {
     const variant = variantOffset + i
-    const buf = renderDesignBackdrop({ keyword, width, height, variant })
+    // distinct：同批每张强制不同哲学，避免「几张看起来都一样」
+    const philosophyIndex = distinct ? (variantOffset + i) % PHILOSOPHIES.length : undefined
+    const buf = renderDesignBackdrop({ keyword, width, height, variant, philosophyIndex })
     backdrops.push({
-      id: `design-${Date.now()}-${variant}`,
+      id: `design-${Date.now()}-${variant}-${i}`,
       provider: 'design',
       sourceName: '设计底图',
       description: `${keyword} · 设计背景 ${variant + 1}`,

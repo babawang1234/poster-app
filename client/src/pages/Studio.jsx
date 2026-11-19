@@ -58,7 +58,7 @@ const EXPORT_SIZES = [
 const GENERIC_IMAGE_TERMS = new Set(['上新', '新品', '产品', '商品', '开售', '促销', '大促', '秒杀', '简约', '极简', '高级', '温暖', '典雅', '海报', '宣传图', '配图'])
 
 /**
- * 素材缩略卡：矢量背景 / 图库实拍 / AI 生成 三类共用同一外观。
+ * 素材缩略卡：矢量背景 / 图库实拍 / 设计底图 三类共用同一外观。
  * 左上角标签说明来源，选中态统一高亮，避免用户在不同来源间产生「这是两套东西」的割裂感。
  */
 function AssetThumb({ item, active, onPick, tag }) {
@@ -154,14 +154,14 @@ export default function Studio() {
 
   // 素材生成（融合三类来源，不再分 Tab）
   //   vector  矢量背景：程序化 SVG，配色跟主题走，成组统一、无损缩放
-  //   gallery 图库实拍：按关键词检索的真实摄影图
-  //   ai      AI 生成：按同一关键词文生图，较慢，异步补入
+  //   design  设计底图：哲学驱动引擎，每张不同构成语言、强制留白（已取消 AI 生图，AI 只用于一键成片）
+  //   gallery 图库实拍：按精准主体词检索的真实摄影图
   const [vectorBackdrops, setVectorBackdrops] = useState([])
-  const [aiImages, setAiImages] = useState([])
+  const [designBackdrops, setDesignBackdrops] = useState([])
   const [generatingAssets, setGeneratingAssets] = useState(false)
   const [vectorLoading, setVectorLoading] = useState(false)
-  const [aiLoading, setAiLoading] = useState(false)
-  const [aiMessage, setAiMessage] = useState('')
+  const [designLoading, setDesignLoading] = useState(false)
+  const [designMessage, setDesignMessage] = useState('')
   const [assetSearched, setAssetSearched] = useState(false)
 
   // 一键成片：输入需求后直接出海报（无需手动搜图）
@@ -747,9 +747,9 @@ export default function Studio() {
 
   /**
    * 素材生成（融合入口）：一次点击并行产出三类候选，不再让用户在三个 Tab 之间切换。
-   *  - 矢量背景 + 图库实拍：秒级返回，先渲染
-   *  - AI 生成：10-40 秒，独立异步补入，慢也不阻塞前两类
-   * 这样「AI 出图背景不一致」不再是必经路径——矢量背景天然成组统一，随时可替换。
+   *  - 矢量背景 / 设计底图：本地生成、毫秒级，先渲染
+   *  - 图库实拍：按精准主体词检索，最后补入
+   * AI 生图已从素材生成移除（风格不一致），改由「一键成片」用于生成各不相同的背景。
    */
   async function generateAssets(query = stockQuery, { silent = false } = {}) {
     const q = String(query || '').trim()
@@ -757,8 +757,8 @@ export default function Studio() {
     setStockQuery(q)
     setGeneratingAssets(true)
     setAssetSearched(true)
-    setAiImages([])
-    setAiMessage('')
+    setDesignBackdrops([])
+    setDesignMessage('')
     setStockSearchMessage('')
 
     const orientation = ratio.w >= ratio.h ? 'landscape' : 'portrait'
@@ -771,21 +771,18 @@ export default function Studio() {
       .catch(() => {})
       .finally(() => setVectorLoading(false))
 
-    // AI：单独跑，慢也不挡其他两类
-    setAiLoading(true)
-    const aiPromise = api
-      .post('/inspire/ai-background', { keyword: q, ratio: '9:16', count: 3 })
-      .then((data) => {
-        setAiImages(data.images || [])
-        if (!data.images?.length) setAiMessage(data.message || 'AI 暂未返回结果，可改用矢量背景或图库实拍')
-      })
-      .catch((e) => setAiMessage(e.message || 'AI 生成失败，可改用矢量背景或图库实拍'))
-      .finally(() => setAiLoading(false))
+    // 设计底图：升级后的哲学驱动引擎，每张强制不同构成语言
+    setDesignLoading(true)
+    const designPromise = api
+      .get(`/assets/design?q=${encodeURIComponent(q)}&orientation=${orientation}&count=6`)
+      .then((data) => setDesignBackdrops(data.backdrops || []))
+      .catch((e) => setDesignMessage(e.message || '设计底图生成失败'))
+      .finally(() => setDesignLoading(false))
 
     try {
       // 图库检索最慢（外部 API），最后补入
       const data = await api.get(
-        `/assets/search?q=${encodeURIComponent(q)}&original=${encodeURIComponent(description || '')}&skipAi=1&skipVector=1&orientation=${orientation}&limit=24`
+        `/assets/search?q=${encodeURIComponent(q)}&original=${encodeURIComponent(description || '')}&skipVector=1&orientation=${orientation}&limit=24`
       )
       setStockPhotos(data.photos || [])
       if (!data.photos?.length) setStockSearchMessage(data.message || '')
@@ -794,7 +791,7 @@ export default function Studio() {
     } finally {
       setGeneratingAssets(false)
     }
-    await Promise.all([vectorPromise, aiPromise])
+    await Promise.all([vectorPromise, designPromise])
   }
 
   async function pickLayout(layout) {
@@ -993,7 +990,7 @@ export default function Studio() {
               <div className="flex items-center justify-between">
                 <div>
                   <h2 className="text-lg font-bold">为你生成的海报</h2>
-                  <p className="mt-1 text-xs text-white/50">AI 已自动找好底图并排版，点击任意一张进入编辑器微调文字与导出。</p>
+                  <p className="mt-1 text-xs text-white/50">每个方案使用不同底图（AI 生成 / 精准图库 / 设计底图），点击任意一张进入编辑器微调文字与导出。</p>
                 </div>
                 <button onClick={() => setOneShotLayouts([])} className="text-xs text-white/40 hover:text-white">收起</button>
               </div>
@@ -1006,13 +1003,18 @@ export default function Studio() {
                     <div className="p-3">
                       <p className="text-sm font-semibold">{l.name}</p>
                       <p className="mt-0.5 text-xs text-white/40">{l.feature}</p>
+                      {l.backgroundOrigin && (
+                        <span className="mt-2 inline-block rounded-full border border-white/15 bg-white/[0.06] px-2 py-0.5 text-[10px] text-white/60">
+                          底图 · {l.backgroundOrigin}
+                        </span>
+                      )}
                       <button onClick={() => openOneShotLayout(l)} className="btn-primary mt-3 w-full text-sm">编辑此方案</button>
                     </div>
                   </div>
                 ))}
               </div>
               <div className="mt-4 rounded-lg border border-white/10 bg-white/[0.03] p-3 text-xs text-white/50">
-                一键成片自动完成「理解需求 → 找底图 → 排版」。若想更换底图或手动控制，可点击上方「手动模式」自行挑选摄影图 / 设计底图 / AI 生图。
+                一键成片自动完成「理解需求 → 生成不同背景 → 排版」，AI 生图已整合在此处为每个方案生成各不相同的背景。若想手动控制，可点击上方「手动模式」自行挑选矢量背景 / 设计底图 / 图库实拍。
               </div>
             </div>
           )}
@@ -1047,7 +1049,7 @@ export default function Studio() {
                     />
                     {stockQuery && (
                       <button
-                        onClick={() => { setStockQuery(''); setStockPhotos([]); setVectorBackdrops([]); setAiImages([]); setAiMessage(''); setAssetSearched(false) }}
+                        onClick={() => { setStockQuery(''); setStockPhotos([]); setVectorBackdrops([]); setDesignBackdrops([]); setDesignMessage(''); setAssetSearched(false) }}
                         className="shrink-0 text-[#bbb] hover:text-[#666]"
                         aria-label="清空"
                       >✕</button>
@@ -1069,8 +1071,8 @@ export default function Studio() {
                     <p className="text-sm text-[#666]">输入一句画面描述，点「生成素材」</p>
                     <p className="mx-auto mt-2 max-w-md text-xs leading-relaxed text-[#999]">
                       会同时准备三类底图：<b className="text-[#666]">矢量背景</b>（配色与主题绑定、成组统一）、
-                      <b className="text-[#666]">图库实拍</b>（真实摄影）、
-                      <b className="text-[#666]">AI 生成</b>（按词现画，约 10-40 秒）。
+                      <b className="text-[#666]">设计底图</b>（哲学驱动、每张不同构成、预留留白）、
+                      <b className="text-[#666]">图库实拍</b>（按精准主体词检索）。
                     </p>
                   </div>
                 )}
@@ -1140,44 +1142,41 @@ export default function Studio() {
                         </div>
                       ) : (
                         <p className="rounded-lg border border-dashed border-[#e2e2e2] bg-white px-4 py-6 text-center text-xs text-[#999]">
-                          {stockSearchMessage || '图库暂时没有匹配的实拍图，可直接选上面的矢量背景或下面的 AI 生成。'}
+                          {stockSearchMessage || '图库暂时没有匹配的实拍图，可直接选上面的矢量背景或下面的设计底图。'}
                         </p>
                       )}
                     </section>
 
-                    {/* 三、AI 生成 */}
+                    {/* 三、设计底图（升级后的哲学驱动引擎，已取代 AI 生成） */}
                     <section>
                       <div className="flex flex-wrap items-baseline justify-between gap-2 pb-2">
                         <div className="flex flex-wrap items-baseline gap-2">
-                          <h3 className="text-sm font-semibold text-[#222]">AI 生成</h3>
-                          <span className="text-[11px] text-[#999]">按同一句描述现画 · 约 10-40 秒</span>
+                          <h3 className="text-sm font-semibold text-[#222]">设计底图</h3>
+                          <span className="text-[11px] text-[#999]">设计哲学驱动 · 每张不同构成 · 预留标题留白</span>
                         </div>
                         <span className="text-[11px] text-[#bbb]">
-                          {aiLoading ? '生成中…' : aiImages.length ? `${aiImages.length} 张` : ''}
+                          {designLoading && !designBackdrops.length ? '生成中…' : `${designBackdrops.length} 张`}
                         </span>
                       </div>
-                      {aiLoading ? (
+                      {designLoading && !designBackdrops.length ? (
                         <div className="grid grid-cols-3 gap-3 sm:grid-cols-4 lg:grid-cols-6">
-                          {[0, 1, 2].map((i) => <div key={i} className="aspect-[3/4] animate-pulse rounded-xl bg-[#ebebeb]" />)}
-                          <p className="col-span-3 self-center text-xs text-[#999] sm:col-span-3">
-                            正在按「{stockQuery}」生成，画好会自动出现在这里，不用等它。
-                          </p>
+                          {[0, 1, 2, 3, 4, 5].map((i) => <div key={i} className="aspect-[3/4] animate-pulse rounded-xl bg-[#ebebeb]" />)}
                         </div>
-                      ) : aiImages.length ? (
+                      ) : designBackdrops.length ? (
                         <div className="grid grid-cols-3 gap-3 sm:grid-cols-4 lg:grid-cols-6">
-                          {aiImages.map((img) => (
+                          {designBackdrops.map((b) => (
                             <AssetThumb
-                              key={img.id}
-                              item={img}
-                              tag="AI 生成"
-                              active={stockAsset?.id === img.id}
-                              onPick={() => pickAsset(img, 'AI 生成')}
+                              key={b.id}
+                              item={b}
+                              tag="设计底图"
+                              active={stockAsset?.id === b.id}
+                              onPick={() => pickAsset(b, '设计底图')}
                             />
                           ))}
                         </div>
                       ) : (
                         <p className="rounded-lg border border-dashed border-[#e2e2e2] bg-white px-4 py-6 text-center text-xs text-[#999]">
-                          {aiMessage || 'AI 图会按同一句描述生成，风格不完全统一；需要成套一致时优先用矢量背景。'}
+                          {designMessage || '换个更具体的主体词试试，设计底图会按主题配色生成成套但各不相同的背景。'}
                         </p>
                       )}
                     </section>

@@ -2,6 +2,7 @@ import { config } from '../config/index.js'
 import { searchLocalPool, toPhoto } from '../lib/local-image-pool.js'
 import { searchCnAssets } from './cn-assets.js'
 import { proxyUrl } from '../lib/image-proxy.js'
+import { buildSearchTerms, relevanceScore } from '../lib/search-terms.js'
 
 const CACHE_TTL = 5 * 60 * 1000
 const cache = new Map()
@@ -178,27 +179,42 @@ export async function searchDesignAssets(query, { count = 12 } = {}) {
 }
 
 export async function searchAssetImages({ query, originalQuery, orientation, perPage = 18 }) {
-  const primary = cleanQuery(query)
-  const original = cleanQuery(originalQuery)
-  const queries = [...new Set([primary, original].filter(Boolean))].slice(0, 2)
-  if (!queries.length) return { photos: [], providers: [], message: '输入主体关键词后即可搜索背景素材。' }
+  // 核心修复：不再把中文整句直接丢给英文图库（几乎零命中）。
+  //  - cnQuery：清洗后的中文主体词 → 本地图库池 / 中文源做精确匹配
+  //  - enQueries：贴题的英文短检索词 → Openverse / Pixabay / Unsplash / Pexels
+  const { subject, enTerms } = buildSearchTerms(query, originalQuery)
+  const cnQuery = subject || cleanQuery(query)
+  const enQueries = enTerms.slice(0, 1)
+  if (!cnQuery && !enQueries.length) return { photos: [], providers: [], message: '输入主体关键词后即可搜索背景素材。' }
 
-  const cacheKey = JSON.stringify({ queries, orientation, perPage, hasUnsplash: !!config.providers.unsplash.accessKey, hasPexels: !!config.providers.pexels.apiKey, hasPixabay: !!config.providers.pixabay.apiKey })
+  const cacheKey = JSON.stringify({ cnQuery, enQueries, orientation, perPage, hasUnsplash: !!config.providers.unsplash.accessKey, hasPexels: !!config.providers.pexels.apiKey, hasPixabay: !!config.providers.pixabay.apiKey })
   const cached = cache.get(cacheKey)
   if (cached && Date.now() - cached.at < CACHE_TTL) return cached.value
 
   const jobs = []
-  for (const searchQuery of queries) {
-    jobs.push({ provider: 'cn', promise: searchCnAssets(searchQuery, { limit: Math.max(8, Math.ceil(perPage / queries.length)) }) })
-    jobs.push({ provider: 'openverse', promise: searchOpenverse(searchQuery, orientation, Math.max(6, Math.ceil(perPage / queries.length))) })
-    if (config.providers.pixabay.apiKey) jobs.push({ provider: 'pixabay', promise: searchPixabay(searchQuery, orientation, Math.max(6, Math.ceil(perPage / queries.length))) })
-    if (config.providers.unsplash.accessKey) jobs.push({ provider: 'unsplash', promise: searchUnsplash(searchQuery, orientation, Math.max(6, Math.ceil(perPage / queries.length))) })
-    if (config.providers.pexels.apiKey) jobs.push({ provider: 'pexels', promise: searchPexels(searchQuery, orientation, Math.max(6, Math.ceil(perPage / queries.length))) })
+  // 英文图库只接受英文短词；没有映射出英文词时（如纯生僻词）仍跳过，避免中文 query 污染结果
+  for (const searchQuery of enQueries) {
+    jobs.push({ provider: 'openverse', promise: searchOpenverse(searchQuery, orientation, Math.max(6, Math.ceil(perPage / enQueries.length))) })
+    if (config.providers.pixabay.apiKey) jobs.push({ provider: 'pixabay', promise: searchPixabay(searchQuery, orientation, Math.max(6, Math.ceil(perPage / enQueries.length))) })
+    if (config.providers.unsplash.accessKey) jobs.push({ provider: 'unsplash', promise: searchUnsplash(searchQuery, orientation, Math.max(6, Math.ceil(perPage / enQueries.length))) })
+    if (config.providers.pexels.apiKey) jobs.push({ provider: 'pexels', promise: searchPexels(searchQuery, orientation, Math.max(6, Math.ceil(perPage / enQueries.length))) })
   }
-  const settled = await Promise.allSettled(jobs.map((job) => job.promise))
-  const photos = settled.flatMap((result) => result.status === 'fulfilled' ? result.value : [])
+  // 中文源抓取的是整页图片 URL，无法验证内容与关键词是否相关；
+  // 单独执行、限量、最后兜底，不再与可信图源混排、更不置顶。
+  const cnPromise = cnQuery
+    ? searchCnAssets(cnQuery, { limit: 6 }).catch(() => [])
+    : Promise.resolve([])
+
+  const [settled, cnPhotosRaw] = await Promise.all([
+    Promise.allSettled(jobs.map((job) => job.promise)),
+    cnPromise,
+  ])
+  const external = settled.flatMap((result) => result.status === 'fulfilled' ? result.value : [])
     .filter((photo) => photo.url?.startsWith('https://') && photo.thumb?.startsWith('https://'))
-  const providers = [...new Set(photos.map((photo) => photo.provider))]
+  // 外部图库按「描述/标签与检索词的相关度」排序，贴题的排前面，无关沉底
+  const relevanceOf = (p) => relevanceScore(p, { enTerms, subject: cnQuery })
+  const externalSorted = external.sort((a, b) => relevanceOf(b) - relevanceOf(a))
+
   const failures = settled.flatMap((result, index) => result.status === 'rejected' ? [{
     provider: jobs[index].provider,
     status: Number(result.reason?.status) || null,
@@ -212,28 +228,21 @@ export async function searchAssetImages({ query, originalQuery, orientation, per
   const hasPixabayKey = !!config.providers.pixabay.apiKey
   const keyMissing = !hasUnsplashKey && !hasPexelsKey && !hasPixabayKey
 
-  // 本地图库池兜底：当外部图库（无 Key 或网络不通）返回空时，用本地预置的真实图片补充
+  // 本地图库池：用「干净的中文主体词」精确匹配，是无 API Key 时最可靠的贴题来源。
+  // 不再等外部全空才兜底——始终检索，让精准命中的本地图排在最前。
   let localPhotos = []
   let localFallback = false
   let aiFallback = false
-  if (photos.length === 0) {
-    localPhotos = searchLocalPool(queries[0], { limit: perPage }).map(toPhoto)
-    if (localPhotos.length) {
-      localFallback = true
-      localPhotos.forEach((p) => providers.push(p.provider))
-    } else {
-      // 本地池也无命中：标记需要上层用 AI 生图兜底（理解任意具体词，如"水厂"）
-      aiFallback = true
-    }
+  if (cnQuery) {
+    localPhotos = searchLocalPool(cnQuery, { limit: perPage }).map(toPhoto)
+    if (localPhotos.length) localFallback = true
   }
-  const merged = [...photos, ...localPhotos]
-  // 中文素材优先展示（解决「都是外国图」）
-  const sorted = merged.sort((a, b) => {
-    const aCn = a.provider === 'cn' ? 0 : 1
-    const bCn = b.provider === 'cn' ? 0 : 1
-    return aCn - bCn
-  })
-  const unique = [...new Map(sorted.map((photo) => [`${photo.provider}:${photo.id}`, photo])).values()]
+  const cnPhotos = (cnPhotosRaw || []).filter((p) => p.url?.startsWith('https://'))
+
+  // 合并优先级：本地池精准命中 > 外部贴题图库 > 外部其余 > 弱相关中文抓取（限量）
+  const merged = [...localPhotos, ...externalSorted, ...cnPhotos]
+  if (merged.length === 0) aiFallback = true
+  const unique = [...new Map(merged.map((photo) => [`${photo.provider}:${photo.id}`, photo])).values()]
     .slice(0, perPage)
     // 外部图源有 Referer 防盗链，浏览器直连必然 403；统一改写成站内代理地址。
     .map((photo) => ({ ...photo, url: proxyUrl(photo.url), thumb: proxyUrl(photo.thumb) }))

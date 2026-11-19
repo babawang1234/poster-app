@@ -61,7 +61,7 @@ function adaptiveTitleSize(text, base = 0.092, min = 0.056) {
   return Math.max(min, size)
 }
 
-export function generateLayouts({ content = {}, purpose = '', canvas, styleAnalysis, artwork, stockAsset }) {
+export function generateLayouts({ content = {}, purpose = '', canvas, styleAnalysis, artwork, stockAsset, stockAssets }) {
   const { width, height } = canvas
   const palette = pickPalette(styleAnalysis)
 
@@ -75,26 +75,32 @@ export function generateLayouts({ content = {}, purpose = '', canvas, styleAnaly
     boldLayout,
   ]
 
+  // 一键成片传入 stockAssets 数组时，每个方案各用一张**不同**的底图，
+  // 解决「4 张海报底图都是同一张照片」；未传时兼容旧的单一 stockAsset 行为。
+  const perVariantAsset = (index) =>
+    (Array.isArray(stockAssets) && stockAssets[index]) || stockAsset
+
   return photoVariants.map((variantIndex, index) => {
+    const asset = perVariantAsset(index)
     const artSrc = artwork || createArtworkDataUrl({ palette: palette.colors, purpose, content, variant: index })
-    const result = stockAsset?.url
-      ? photoLayout({ content, palette, width, height, artSrc, index: variantIndex, stockAsset })
+    const result = asset?.url
+      ? photoLayout({ content, palette, width, height, artSrc, index: variantIndex, stockAsset: asset })
       : fallbackVariants[index]({ content, palette, width, height, artSrc, index })
     // 只有真实图库素材需要署名（Unsplash/Pexels 等许可证要求）。
     // 矢量背景 / AI 生成 / 设计底图是站内自有产物，加 "Photo: …" 底栏只会污染版面。
     const needsAttribution =
-      !!stockAsset?.photographer && !['ai', 'design', 'vector', 'generation'].includes(stockAsset.provider)
+      !!asset?.photographer && !['ai', 'design', 'vector', 'generation', 'ai-design'].includes(asset.provider)
     if (needsAttribution) {
       result.layers.push({
         type: 'shape', kind: 'rect', x: 0, y: 0.963, width: 1, height: 0.037,
         color: 'rgba(0,0,0,.38)', zIndex: 89,
       })
       result.layers.push({
-        type: 'text', text: `Photo: ${stockAsset.photographer} / ${stockAsset.sourceName || 'Unsplash'}`,
+        type: 'text', text: `Photo: ${asset.photographer} / ${asset.sourceName || 'Unsplash'}`,
         x: 0.04, y: 0.975, fontSize: 0.011, fontWeight: 400,
         color: 'rgba(255,255,255,.82)',
-        maxWidth: 0.92, zIndex: 90, sourceUrl: stockAsset.profileUrl,
-        unsplashUrl: stockAsset.unsplashUrl, photographer: stockAsset.photographer,
+        maxWidth: 0.92, zIndex: 90, sourceUrl: asset.profileUrl,
+        unsplashUrl: asset.unsplashUrl, photographer: asset.photographer,
       })
     }
     return {
@@ -104,12 +110,17 @@ export function generateLayouts({ content = {}, purpose = '', canvas, styleAnaly
       canvas: { width, height },
       background: result.background,
       layers: result.layers,
+      // 每个方案带上自己用的底图，供前端在结果卡片上标注来源、也便于进入编辑器后替换
+      backgroundAsset: asset ? {
+        id: asset.id, provider: asset.provider, sourceName: asset.sourceName,
+        url: asset.url, thumb: asset.thumb, license: asset.license,
+      } : null,
       stockAttribution: needsAttribution ? {
-        photographer: stockAsset.photographer,
-        sourceName: stockAsset.sourceName || 'Unsplash',
-        profileUrl: stockAsset.profileUrl,
-        sourceUrl: stockAsset.sourceUrl || stockAsset.unsplashUrl,
-        license: stockAsset.license || '',
+        photographer: asset.photographer,
+        sourceName: asset.sourceName || 'Unsplash',
+        profileUrl: asset.profileUrl,
+        sourceUrl: asset.sourceUrl || asset.unsplashUrl,
+        license: asset.license || '',
       } : null,
     }
   })

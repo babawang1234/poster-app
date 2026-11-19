@@ -2,10 +2,8 @@ import { Router } from 'express'
 import { authRequired } from '../middleware/auth.js'
 import { asyncHandler } from '../lib/http.js'
 import { config } from '../config/index.js'
-import { searchAssetImages, searchDesignAssets } from '../services/asset-search.js'
+import { searchAssetImages } from '../services/asset-search.js'
 import { generateDesignBackdrops } from '../lib/design-backdrop.js'
-import { encodeBufferToDataUrl } from '../lib/renderer.js'
-import { getCachedGeneration, setCachedGeneration } from '../lib/gen-cache.js'
 import { scrapeImages, scraperStatus, ScrapeError, validateTarget } from '../lib/scraper.js'
 import { generateVectorBackdrops } from '../lib/vector-backdrop.js'
 import path from 'path'
@@ -19,6 +17,42 @@ const router = Router()
 router.use(authRequired)
 
 const VECTOR_DIR = path.resolve(__dirname, '../../public/vector-backdrops')
+const DESIGN_DIR = path.resolve(__dirname, '../../public/design-backdrops')
+
+/**
+ * 生成「设计底图」并落盘，返回站内 URL。
+ * 引擎已按 GitHub 开源设计 Skill（canvas-design / algorithmic-art）的方法论重写：
+ * 视觉哲学驱动 + 种子随机 + 噪声流场 + 有限配色 + 强制留白，且每张强制不同哲学。
+ * 落盘而非 data URL：响应轻、可被浏览器缓存、海报导出时渲染器可直接按站内路径读取。
+ */
+function persistDesignBackdrops(keyword, { count = 6, width = 1080, height = 1440, variantOffset = 0 } = {}) {
+  const items = generateDesignBackdrops(keyword, { count, width, height, variantOffset, distinct: true })
+  try {
+    fs.mkdirSync(DESIGN_DIR, { recursive: true })
+  } catch {}
+  return items.map((b) => {
+    const url = `/design-backdrops/${b.id}.png`
+    const file = path.join(DESIGN_DIR, `${b.id}.png`)
+    try {
+      if (!fs.existsSync(file)) fs.writeFileSync(file, b.buffer)
+    } catch (e) {
+      console.warn('[assets] 设计底图落盘失败：', e.message)
+    }
+    return {
+      id: b.id,
+      provider: 'design',
+      sourceName: '设计底图',
+      description: b.description,
+      url,
+      thumb: url,
+      photographer: '幻象工坊 · 设计库',
+      license: '设计底图 · 可商用',
+      kind: 'design',
+      width: b.width,
+      height: b.height,
+    }
+  })
+}
 
 /**
  * 生成矢量背景并落盘，返回可直接给 <img> 用的站内路径。
@@ -73,120 +107,23 @@ router.get('/search', asyncHandler(async (req, res) => {
   const originalQuery = String(req.query.original || '').trim().slice(0, 160)
   const orientation = ['landscape', 'portrait', 'squarish'].includes(req.query.orientation) ? req.query.orientation : undefined
   const limit = Math.min(48, Math.max(12, Number(req.query.limit) || 36))
-  // skipAi=1：素材融合模式下 AI 由前端并行单独发起，这里跳过以免把整体响应拖到 30 秒以上
-  const skipAi = req.query.skipAi === '1'
   const result = await searchAssetImages({ query, originalQuery, orientation, perPage: limit })
 
-  // 关键兜底：图库 + 本地池都无命中时（aiFallback），用真实 AI 生图按关键词生成贴题图，
-  // 解决"换任意关键词搜不出、图文不符"的根本问题（AI 能理解"水厂"等具体实体词）。
-  //
-  // 三层策略（面向大众，避免免费额度被并发打爆）：
-  //   1) 落盘缓存命中 → 直接复用，不消耗额度
-  //   2) 智谱 CogView-3-Flash（免费、中文理解强、一次真出多张不同图）
-  //   3) Pollinations 兜底（无 Key 时，1 真图 + 像素变体）
-  let aiGeneratedPhotos = []
-  if (!skipAi && result.aiFallback && result.photos.length === 0) {
-    try {
-      const { keywordToImagePrompt } = await import('../lib/image-prompt.js')
-      const prompt = keywordToImagePrompt(query)
-      if (prompt) {
-        // 层 1：缓存命中
-        const cached = getCachedGeneration(query, 1080, 1440)
-        if (cached && cached.length) {
-          aiGeneratedPhotos = cached.map((buf, i) => {
-            const dataUrl = encodeBufferToDataUrl(buf, 'image/jpeg')
-            return {
-              id: `ai-cache-${Date.now()}-${i}`,
-              provider: 'ai',
-              sourceName: 'AI 生成',
-              description: `${query} · AI 生成贴题图 ${i + 1}`,
-              url: dataUrl, thumb: dataUrl,
-              photographer: 'AI 生成',
-              license: 'AI 生成 · 可商用',
-            }
-          })
-        } else {
-          // 层 2：智谱免费生图（串行多张不同图，免费档不支持 n 参数）
-          const { ZhipuAdapter } = await import('../adapters/zhipu.js')
-          const zhipu = new ZhipuAdapter()
-          if (zhipu.available) {
-            // 免费档串行限速，n=3 约需 30 秒内返回；配合缓存复用，实际只生成一次
-            const { urls } = await zhipu.generateImage({ prompt, width: 1080, height: 1440, n: 3 })
-            const buffers = await Promise.all(
-              urls.map(async (u) => {
-                const r = await fetch(u, { signal: AbortSignal.timeout(30000) })
-                return Buffer.from(await r.arrayBuffer())
-              })
-            )
-            setCachedGeneration(query, 1080, 1440, buffers)
-            aiGeneratedPhotos = buffers.map((buf, i) => {
-              const dataUrl = encodeBufferToDataUrl(buf, 'image/jpeg')
-              return {
-                id: `ai-zhipu-${Date.now()}-${i}`,
-                provider: 'ai', sourceName: 'AI 生成',
-                description: `${query} · AI 生成贴题图 ${i + 1}`,
-                url: dataUrl, thumb: dataUrl,
-                photographer: 'AI 生成',
-                license: 'AI 生成 · 可商用',
-              }
-            })
-          } else {
-            // 层 3：Pollinations 兜底（无 Key 时）
-            const { PollinationsAdapter, deriveVariants } = await import('../adapters/pollinations.js')
-            const pollinations = new PollinationsAdapter()
-            if (pollinations.available) {
-              const { buffer } = await pollinations.generateImage({ prompt, width: 1080, height: 1440, seed: Math.floor(Math.random() * 1e9) })
-              const variants = await deriveVariants(buffer, 6)
-              setCachedGeneration(query, 1080, 1440, variants.map((v) => v.buffer))
-              aiGeneratedPhotos = variants.map((v, i) => {
-                const dataUrl = encodeBufferToDataUrl(v.buffer, 'image/jpeg')
-                return {
-                  id: `ai-search-${Date.now()}-${i}`,
-                  provider: 'ai', sourceName: 'AI 生成',
-                  description: `${query} · AI 生成贴题图 ${i + 1}`,
-                  url: dataUrl, thumb: dataUrl,
-                  photographer: 'AI 生成',
-                  license: 'AI 生成 · 可商用',
-                }
-              })
-            }
-          }
-        }
-      }
-    } catch (e) {
-      console.warn('[assets] AI 兜底生图失败：', e.message)
-    }
-  }
+  // 素材生成链路已按需求取消 AI 生图能力：AI 生图只用于「一键成片」生成不同背景。
+  // 图库无命中时不再触发任何生图模型，改由前端引导用户使用设计底图 / 矢量背景。
 
-  // 「设计底图」已被矢量背景取代：canvas 栅格化既慢又比 SVG 更重，仅保留 withDesign=1 的兼容开关，
-  // 默认不再生成，避免每次检索都白白占用 CPU 与响应体积。
+  // 设计底图已升级为独立素材来源（GET /assets/design），这里仅保留 withDesign=1 的兼容开关，
+  // 默认不再内联生成 PNG data URL，避免每次检索都白白撑大响应体积。
   let designBackdrops = []
   if (req.query.withDesign === '1') {
     try {
-      const count = 6
-      const backdrops = generateDesignBackdrops(query, { count })
-      designBackdrops = backdrops.map((b) => {
-        const dataUrl = encodeBufferToDataUrl(b.buffer, 'image/png')
-        return {
-          id: b.id,
-          provider: 'design',
-          sourceName: '设计底图',
-          description: b.description,
-          url: dataUrl,
-          thumb: dataUrl,
-          photographer: '幻象工坊 · 设计库',
-          license: '设计底图 · 可商用',
-          kind: 'design',
-          width: b.width,
-          height: b.height,
-        }
-      })
+      designBackdrops = persistDesignBackdrops(query, { count: 6 })
     } catch (e) {
       console.warn('[assets] 设计底图生成失败：', e.message)
     }
   }
 
-  const photos = [...result.photos, ...aiGeneratedPhotos]
+  const photos = result.photos
 
   // 矢量背景：与图库检索同步返回，前端一次性拿到「实拍 + 矢量」两类候选。
   // 矢量图可控配色、成组统一，是不依赖生图模型的稳定底图来源。
@@ -204,7 +141,7 @@ router.get('/search', asyncHandler(async (req, res) => {
   res.json({
     ...result,
     photos,
-    aiFallback: !!aiGeneratedPhotos.length,
+    aiFallback: false,
     message: photos.length || vectors.length ? '' : result.message,
     designBackdrops,
     vectors,
@@ -225,43 +162,32 @@ router.get('/vector', asyncHandler(async (req, res) => {
   res.json({ vectors })
 }))
 
-// 单独获取"设计底图"（虚拟背景）——供「设计底图」Tab 使用
+// 单独获取「设计底图」——升级后的哲学驱动引擎，每张强制不同构成语言。
+// 落盘 URL 代替内联 data URL，前端 <img> 直接可用、不撑大响应。
 router.get('/design-backdrops', asyncHandler(async (req, res) => {
   const query = String(req.query.q || '').trim().slice(0, 100)
   if (!query) return res.json({ backdrops: [] })
-  const count = Math.min(12, Math.max(4, Number(req.query.count) || 8))
+  const count = Math.min(12, Math.max(2, Number(req.query.count) || 6))
+  const orientation = ['landscape', 'portrait', 'squarish'].includes(req.query.orientation)
+    ? req.query.orientation
+    : 'portrait'
+  const [w, h] = orientation === 'landscape' ? [1440, 1080] : orientation === 'squarish' ? [1200, 1200] : [1080, 1440]
+  const variantOffset = Number(req.query.offset) || 0
+  const backdrops = persistDesignBackdrops(query, { count, width: w, height: h, variantOffset })
+  res.json({ backdrops, fromGallery: false, engine: 'design-philosophy-v2' })
+}))
 
-  // 优先：从 Pixabay 搜真实设计类素材（abstract/pattern/texture），有设计感且区别于摄影图
-  let designAssets = []
-  try {
-    designAssets = await searchDesignAssets(query, { count })
-  } catch (e) {
-    console.warn('[design-backdrops] 图库设计素材获取失败：', e.message)
-  }
-
-  // 兜底：程序化生成设计底图（渐变/孟菲斯/几何等），保证任何关键词都能出图
-  const backdrops = generateDesignBackdrops(query, { count })
-
-  const programmatic = backdrops.map((b) => {
-    const dataUrl = encodeBufferToDataUrl(b.buffer, 'image/png')
-    return {
-      id: b.id,
-      provider: 'design',
-      sourceName: '设计底图',
-      description: b.description,
-      url: dataUrl,
-      thumb: dataUrl,
-      photographer: '幻象工坊 · 设计库',
-      license: '设计底图 · 可商用',
-      kind: 'design',
-      width: b.width,
-      height: b.height,
-    }
-  })
-
-  // 真实设计素材在前（更有设计感），程序化生成在后（兜底）
-  const items = [...designAssets, ...programmatic]
-  res.json({ backdrops: items, fromGallery: !!designAssets.length })
+// /assets/design 与上面的语义一致，供前端「素材生成」统一入口调用
+router.get('/design', asyncHandler(async (req, res) => {
+  const query = String(req.query.q || '').trim().slice(0, 100)
+  if (!query) return res.json({ backdrops: [] })
+  const count = Math.min(12, Math.max(2, Number(req.query.count) || 6))
+  const orientation = ['landscape', 'portrait', 'squarish'].includes(req.query.orientation)
+    ? req.query.orientation
+    : 'portrait'
+  const [w, h] = orientation === 'landscape' ? [1440, 1080] : orientation === 'squarish' ? [1200, 1200] : [1080, 1440]
+  const backdrops = persistDesignBackdrops(query, { count, width: w, height: h })
+  res.json({ backdrops, engine: 'design-philosophy-v2' })
 }))
 
 // Required by Unsplash API guidelines when a user selects a photo for use.
