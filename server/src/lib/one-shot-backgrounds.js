@@ -159,6 +159,18 @@ export async function buildOneShotBackgrounds(description, { count = 4, offset =
     })
   }
 
+  // 贴题图全部来自中文素材站时，额外补一张 AI 生成背景放到首位：
+  // 中文站图片常带博主水印/英文文案，AI 生成图更干净，给用户一个可直接用的选项。
+  // 只给 15 秒预算：命中缓存立即返回；未命中则后台继续生成并落盘，下次「换一批」即生效。
+  const onlyCn = chosen.length > 0 && chosen.every((c) => c.asset?.provider === 'cn')
+  if (onlyCn) {
+    const [buf] = await aiBackdrops(query, 1, { waitMs: 15000 })
+    if (buf) {
+      chosen.unshift({ asset: aiAsset(buf, query, 0), origin: 'AI 生图', score: 110 })
+      if (chosen.length > count) chosen.length = count
+    }
+  }
+
   const sources = [...new Set(chosen.map((c) => c.origin))]
   const matchInfo = {
     subject: query,
