@@ -3,8 +3,9 @@ node_modules/
 **/node_modules/
 
 # 构建产物
-# client/dist 必须随源码一起发布：云端沙箱不会执行 npm run build，
-# 若忽略它，重新发布时沙箱会复用上一次的旧前端（表现为「代码改了线上没变」）。
+# 前端产物已改为输出到 server/public/app（普通静态目录，随源码上传）。
+# client/dist 是旧方案的本地残留，继续忽略以免误提交。
+client/dist/
 server/dist/
 
 # 运行时数据（本地数据库、上传文件、导出文件）
