@@ -168,6 +168,9 @@ export default function Studio() {
   const [oneShotLoading, setOneShotLoading] = useState(false)
   const [oneShotLayouts, setOneShotLayouts] = useState([])
   const [oneShotMessage, setOneShotMessage] = useState('')
+  const [oneShotMatch, setOneShotMatch] = useState(null)
+  const [oneShotDesc, setOneShotDesc] = useState('')
+  const [oneShotOffset, setOneShotOffset] = useState(0)
 
   // step3
   const [content, setContent] = useState({
@@ -388,7 +391,7 @@ export default function Studio() {
   }
 
   /** 一键成片：输入需求 → 后端自动找底图 + 排版，直接返回可编辑的海报方案 */
-  async function generateOneShot(text = description) {
+  async function generateOneShot(text = description, offset = 0) {
     const desc = String(text || '').trim()
     if (!desc) {
       toast.error('先描述一下你想做的海报吧')
@@ -397,10 +400,13 @@ export default function Studio() {
     setOneShotLoading(true)
     setOneShotMessage('')
     setOneShotLayouts([])
+    setOneShotDesc(desc)
+    setOneShotOffset(offset)
     try {
-      const d = await api.post('/inspire/one-shot', { description: desc })
+      const d = await api.post('/inspire/one-shot', { description: desc, offset })
       setOneShotLayouts(d.layouts || [])
       setOneShotMessage(d.message || '')
+      setOneShotMatch(d.matchInfo || null)
       // 同步填充文案与需求理解，便于后续手动调整
       if (d.brief?.purpose) setPurpose(d.brief.purpose)
       if (d.content) setContent((c) => ({ ...c, ...d.content }))
@@ -418,6 +424,8 @@ export default function Studio() {
   /** 从一键成片结果进入编辑器 */
   async function openOneShotLayout(layout) {
     setSelectedLayout(layout)
+    // 把该方案实际使用的贴题背景带入工作台：进编辑器后可继续替换素材 / 套用灵感库模板
+    if (layout.backgroundAsset) setStockAsset(layout.backgroundAsset)
     const withIds = layout.layers.map((l, i) => ({ ...l, id: `layer-${i}` }))
     setEditingLayers(withIds)
     historyRef.current = { undo: [], redo: [] }
@@ -749,7 +757,8 @@ export default function Studio() {
    * 素材生成（融合入口）：一次点击并行产出三类候选，不再让用户在三个 Tab 之间切换。
    *  - 矢量背景 / 设计底图：本地生成、毫秒级，先渲染
    *  - 图库实拍：按精准主体词检索，最后补入
-   * AI 生图已从素材生成移除（风格不一致），改由「一键成片」用于生成各不相同的背景。
+   * AI 生图已从素材生成移除（风格不一致），改在一键成片里按主体词补生成贴题背景；
+   * 场景背景以「与关键词强相关的摄影实拍」为主，抽象设计底图只留在素材生成里做通用底纹。
    */
   async function generateAssets(query = stockQuery, { silent = false } = {}) {
     const q = String(query || '').trim()
@@ -984,37 +993,62 @@ export default function Studio() {
             )}
           </div>
 
-          {/* 一键成片结果：直接展示生成的海报成品 */}
-          {oneShotLayouts.length > 0 && !oneShotLoading && (
+          {/* 一键成片结果：只展示与关键词强相关的背景，可直接进入编辑器继续 */}
+          {!oneShotLoading && (oneShotLayouts.length > 0 || oneShotMessage) && (
             <div className="mt-6 rounded-2xl border border-white/10 bg-white/[0.03] p-6">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <h2 className="text-lg font-bold">为你生成的海报</h2>
-                  <p className="mt-1 text-xs text-white/50">每个方案使用不同底图（AI 生成 / 精准图库 / 设计底图），点击任意一张进入编辑器微调文字与导出。</p>
+                  <p className="mt-1 text-xs text-white/50">
+                    {oneShotMatch?.subject ? (
+                      <>本批背景均匹配「<span className="font-semibold text-brand-violet">{oneShotMatch.subject}</span>」，共找到 {oneShotMatch.totalRelevant} 张贴题素材，以下 {oneShotLayouts.length} 个方案各用一张不同底图。</>
+                    ) : '点击任意一张进入编辑器微调文字与导出。'}
+                  </p>
                 </div>
-                <button onClick={() => setOneShotLayouts([])} className="text-xs text-white/40 hover:text-white">收起</button>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => generateOneShot(oneShotDesc || description, oneShotOffset + 4)}
+                    disabled={oneShotLoading}
+                    className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs text-white/70 transition hover:border-brand-violet/40 hover:text-white disabled:opacity-40"
+                  >
+                    ⟳ 换一批背景
+                  </button>
+                  <button onClick={() => { setOneShotLayouts([]); setOneShotMessage('') }} className="text-xs text-white/40 hover:text-white">收起</button>
+                </div>
               </div>
-              <div className="mt-4 grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
-                {oneShotLayouts.map((l, i) => (
-                  <div key={i} className="overflow-hidden rounded-xl border border-white/10 bg-white/[0.02]">
-                    <button onClick={() => openOneShotLayout(l)} className="block w-full text-left">
-                      <img src={l.thumbnail} alt={l.name} className="w-full object-cover" />
-                    </button>
-                    <div className="p-3">
-                      <p className="text-sm font-semibold">{l.name}</p>
-                      <p className="mt-0.5 text-xs text-white/40">{l.feature}</p>
-                      {l.backgroundOrigin && (
-                        <span className="mt-2 inline-block rounded-full border border-white/15 bg-white/[0.06] px-2 py-0.5 text-[10px] text-white/60">
-                          底图 · {l.backgroundOrigin}
-                        </span>
-                      )}
-                      <button onClick={() => openOneShotLayout(l)} className="btn-primary mt-3 w-full text-sm">编辑此方案</button>
+              {oneShotLayouts.length > 0 && (
+                <div className="mt-4 grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
+                  {oneShotLayouts.map((l, i) => (
+                    <div key={i} className="overflow-hidden rounded-xl border border-white/10 bg-white/[0.02]">
+                      <button onClick={() => openOneShotLayout(l)} className="block w-full text-left">
+                        <img src={l.thumbnail} alt={l.name} className="w-full object-cover" />
+                      </button>
+                      <div className="p-3">
+                        <p className="text-sm font-semibold">{l.name}</p>
+                        <p className="mt-0.5 text-xs text-white/40">{l.feature}</p>
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          {l.matchedSubject && (
+                            <span className="inline-block rounded-full border border-brand-violet/30 bg-brand-violet/10 px-2 py-0.5 text-[10px] text-brand-violet">
+                              匹配 · {l.matchedSubject}
+                            </span>
+                          )}
+                          {l.backgroundOrigin && (
+                            <span className="inline-block rounded-full border border-white/15 bg-white/[0.06] px-2 py-0.5 text-[10px] text-white/60">
+                              底图 · {l.backgroundOrigin}
+                            </span>
+                          )}
+                        </div>
+                        <button onClick={() => openOneShotLayout(l)} className="btn-primary mt-3 w-full text-sm">编辑此方案</button>
+                      </div>
                     </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
+              {oneShotMessage && (
+                <div className="mt-4 rounded-lg border border-amber-400/20 bg-amber-400/[0.06] p-3 text-xs text-amber-200/80">{oneShotMessage}</div>
+              )}
               <div className="mt-4 rounded-lg border border-white/10 bg-white/[0.03] p-3 text-xs text-white/50">
-                一键成片自动完成「理解需求 → 生成不同背景 → 排版」，AI 生图已整合在此处为每个方案生成各不相同的背景。若想手动控制，可点击上方「手动模式」自行挑选矢量背景 / 设计底图 / 图库实拍。
+                一键成片已改为「按关键词匹配贴题背景」：抽象设计底图不再混入场景背景，也不再用无关图片凑数；选中方案后背景会带入工作台，可继续替换素材或套用灵感库模板。
               </div>
             </div>
           )}

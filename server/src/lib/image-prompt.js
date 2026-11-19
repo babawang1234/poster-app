@@ -10,6 +10,15 @@
 
 // 中文关键词 → 英文视觉描述（用于海报底图，强调留白、氛围、可叠字）
 const TOPIC_MAP = [
+  // 具体主体优先：这些词比上位节日词更贴题，必须放在最前面并配合最长匹配。
+  // 否则「中秋月饼」会先命中「中秋」→ 月亮灯笼，而用户要的是月饼。
+  { keys: ['月饼'], en: 'a beautifully arranged collection of traditional chinese mooncakes on an elegant tray, warm golden lighting, mid autumn festival mood, professional food photography, generous empty space for text' },
+  { keys: ['粽子', '端午', '龙舟'], en: 'traditional chinese zongzi rice dumplings wrapped in bamboo leaves on a wooden table, dragon boat festival mood, warm natural light, professional food photography, space for text' },
+  { keys: ['汤圆', '元宵', '饺子'], en: 'traditional chinese festival food beautifully plated, warm home atmosphere, soft light, professional food photography, space for text' },
+  { keys: ['珍珠奶茶', '奶茶', '奶盖'], en: 'a refreshing cup of bubble milk tea with tapioca pearls on a wooden table, soft natural light, clean minimal background, professional drink photography, space for text' },
+  { keys: ['火锅', '麻辣'], en: 'a steaming chinese hot pot with rich ingredients on a wooden table, appetizing warm tones, professional food photography, space for text' },
+  { keys: ['冰淇淋', '雪糕'], en: 'artisan ice cream in an elegant bowl, soft pastel tones, clean minimal background, professional food photography, space for text' },
+  { keys: ['啤酒', '红酒', '香槟'], en: 'an elegant glass of craft drink with warm ambient light, refined bar atmosphere, professional beverage photography, space for text' },
   // 节日 / 情感
   { keys: ['情人节', '七夕', '520', '告白', '爱情', '浪漫', '恋爱'], en: 'a romantic valentine scene with red roses and soft bokeh hearts, warm pink and red tones, dreamy atmosphere, shallow depth of field, elegant space for text' },
   { keys: ['玫瑰', '鲜花', '花束'], en: 'a bouquet of fresh roses in soft natural light, delicate petals, elegant floral background, space for text' },
@@ -117,10 +126,14 @@ export function keywordToImagePrompt(keyword) {
     return `${q}, professional photography, elegant composition, space for text overlay, high quality`
   }
 
+  // 最长匹配优先：避免「中秋月饼」先命中「中秋」→ 月亮灯笼，而漏掉更具体的「月饼」。
+  let best = null
   for (const { keys, en } of TOPIC_MAP) {
-    if (keys.some((k) => q.includes(k))) return en
+    for (const k of keys) {
+      if (q.includes(k) && (!best || k.length > best.len)) best = { len: k.length, en }
+    }
   }
-  return genericBackdrop(q)
+  return best ? best.en : genericBackdrop(q)
 }
 
 /**

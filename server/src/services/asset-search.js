@@ -178,7 +178,7 @@ export async function searchDesignAssets(query, { count = 12 } = {}) {
   return results.map((photo) => ({ ...photo, url: proxyUrl(photo.url), thumb: proxyUrl(photo.thumb) }))
 }
 
-export async function searchAssetImages({ query, originalQuery, orientation, perPage = 18 }) {
+export async function searchAssetImages({ query, originalQuery, orientation, perPage = 18, cnLimit = 6 }) {
   // 核心修复：不再把中文整句直接丢给英文图库（几乎零命中）。
   //  - cnQuery：清洗后的中文主体词 → 本地图库池 / 中文源做精确匹配
   //  - enQueries：贴题的英文短检索词 → Openverse / Pixabay / Unsplash / Pexels
@@ -187,7 +187,7 @@ export async function searchAssetImages({ query, originalQuery, orientation, per
   const enQueries = enTerms.slice(0, 1)
   if (!cnQuery && !enQueries.length) return { photos: [], providers: [], message: '输入主体关键词后即可搜索背景素材。' }
 
-  const cacheKey = JSON.stringify({ cnQuery, enQueries, orientation, perPage, hasUnsplash: !!config.providers.unsplash.accessKey, hasPexels: !!config.providers.pexels.apiKey, hasPixabay: !!config.providers.pixabay.apiKey })
+  const cacheKey = JSON.stringify({ cnQuery, enQueries, orientation, perPage, cnLimit, hasUnsplash: !!config.providers.unsplash.accessKey, hasPexels: !!config.providers.pexels.apiKey, hasPixabay: !!config.providers.pixabay.apiKey })
   const cached = cache.get(cacheKey)
   if (cached && Date.now() - cached.at < CACHE_TTL) return cached.value
 
@@ -202,7 +202,7 @@ export async function searchAssetImages({ query, originalQuery, orientation, per
   // 中文源抓取的是整页图片 URL，无法验证内容与关键词是否相关；
   // 单独执行、限量、最后兜底，不再与可信图源混排、更不置顶。
   const cnPromise = cnQuery
-    ? searchCnAssets(cnQuery, { limit: 6 }).catch(() => [])
+    ? searchCnAssets(cnQuery, { limit: cnLimit }).catch(() => [])
     : Promise.resolve([])
 
   const [settled, cnPhotosRaw] = await Promise.all([

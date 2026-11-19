@@ -41,9 +41,12 @@ export async function searchCnAssets(query, { limit = 24 } = {}) {
   const kw = String(query || '').trim()
   if (!kw) return []
 
-  const results = []
-  try { results.push(...await crawlDuitang(kw)) } catch (e) { console.warn('[cn-assets] 堆糖失败：', e.message) }
-  try { results.push(...await crawlZcool(kw)) } catch (e) { console.warn('[cn-assets] 站酷失败：', e.message) }
+  // 两个源并行抓取，避免串行叠加两次 10s 超时拖慢「一键成片」出片速度
+  const [duitang, zcool] = await Promise.all([
+    crawlDuitang(kw).catch((e) => { console.warn('[cn-assets] 堆糖失败：', e.message); return [] }),
+    crawlZcool(kw).catch((e) => { console.warn('[cn-assets] 站酷失败：', e.message); return [] }),
+  ])
+  const results = [...duitang, ...zcool]
 
   const unique = [...new Set(results)]
     .filter((u) => /\.(jpg|jpeg|png|webp)/i.test(u))

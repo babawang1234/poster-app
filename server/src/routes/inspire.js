@@ -4,20 +4,15 @@ import { asyncHandler } from '../lib/http.js'
 import { db } from '../lib/db.js'
 import { draftCopy, parseBrief, scoreTemplates } from '../skills/poster/interpret.js'
 import { autoRoute, invoke } from '../adapters/index.js'
-import { searchLocalPool, toPhoto } from '../lib/local-image-pool.js'
 import { generateLayouts } from '../lib/layouts.js'
 import { renderPoster, encodeBufferToDataUrl } from '../lib/renderer.js'
-import { proxyUrl } from '../lib/image-proxy.js'
-import { buildSearchTerms } from '../lib/search-terms.js'
-import { generateDesignBackdrops } from '../lib/design-backdrop.js'
+import { buildOneShotBackgrounds, describeOneShotSubject } from '../lib/one-shot-backgrounds.js'
 
 const router = Router()
 router.use(authRequired)
 
 // 同一 prompt 的生图请求合并：并发点击只触发一次真实生成，避免撞上匿名层限速。
 const aiInflight = new Map()
-// 一键成片底图轮转游标：保证连续多次成片不会反复用同一张底图
-let poolCursor = 0
 
 const PURPOSES = new Set(['活动宣传', '产品推广', '电商促销', '社媒运营', '品牌宣传', '招聘启事', '节日祝福'])
 const RATIOS = new Set(['3:4', '9:16', '1:1', '16:9'])
@@ -373,150 +368,57 @@ router.post(
 )
 
 /**
- * 一键成片 AI 背景：按精准主体词文生图，限时参与（不拖慢出片）。
- * 每次换 seed → 与图库/设计底图凑成的同批背景必然各不相同。
- * 免费生图通道有 ~45s/张 限速，故给 8 秒预算：命中就用，超时静默降级。
- */
-const oneShotAiFlight = new Map()
-async function oneShotAiBackdrop(subject) {
-  const key = `oneshot:${subject}`
-  if (!oneShotAiFlight.has(key)) {
-    oneShotAiFlight.set(key, (async () => {
-      try {
-        const { PollinationsAdapter } = await import('../adapters/pollinations.js')
-        const { buildImagePromptVariants } = await import('../lib/image-prompt.js')
-        const adapter = new PollinationsAdapter()
-        if (!adapter.available) return null
-        const prompt = buildImagePromptVariants(subject, 1)[0]
-        if (!prompt) return null
-        const { buffer } = await adapter.generateImage({
-          prompt, width: 1080, height: 1440,
-          seed: Math.floor(Math.random() * 1e9),
-        })
-        return buffer
-      } catch (e) {
-        console.warn('[inspire] one-shot AI 背景生成失败：', e.message)
-        return null
-      } finally {
-        oneShotAiFlight.delete(key)
-      }
-    })())
-  }
-  return Promise.race([
-    oneShotAiFlight.get(key),
-    new Promise((resolve) => setTimeout(() => resolve(null), 8000)),
-  ])
-}
-
-/**
- * 一键成片：输入一句需求 → 自动完成「理解 → 生成多张不同背景 → 排版成海报」。
+ * 一键成片：输入一句需求 → 自动完成「理解 → 匹配贴题背景 → 排版成海报」。
  *
- * 修复两个体验问题：
- *  1) 底图不精准：用 search-terms 从整句需求里抽出「主体词」（去掉「帮我做张海报」等意图词），
- *     再分别用于图库精确匹配、AI 生图英文 prompt、设计底图主题色。
- *  2) 底图都一样：以前只挑 1 张图给 4 个方案共用。现在为每个方案准备**不同**背景，
- *     来源混合「AI 生图 / 精准图库实拍 / 升级版设计底图（不同设计哲学）」，保证视觉差异。
+ * 核心约束：背景必须与用户关键词强相关，能直接拿去继续用模板 / 编辑器微调。
+ * 背景一律来自 one-shot-backgrounds 的「相关性闸门」结果：摄影图实拍
+ * （本地池 / 外部图库 / 中文素材站）优先，不足时 AI 按主体词现画；
+ * 抽象设计底图不再作为场景背景，也不再用无关图凑满 4 张。
  */
 router.post(
   '/one-shot',
   asyncHandler(async (req, res) => {
     const description = String(req.body?.description || '').trim().slice(0, 500)
     if (!description) return res.status(400).json({ error: 'EMPTY_DESCRIPTION', message: '请描述你想做的海报' })
+    // 「换一批」用 offset 轮转同主题的其他贴题素材
+    const offset = Math.min(24, Math.max(0, Number(req.body?.offset) || 0))
 
-    // 1) 理解需求
+    // 1) 理解需求（排版引擎保持不变）
     const brief = parseBrief(description)
     const content = draftCopy(description, brief.purpose, brief.concepts)
-    const { subject, enTerms } = buildSearchTerms(description)
-    // 精准主体词：优先清洗结果，退回到 brief 的 subject，最后才用原文
-    const subjectQuery = (subject || brief.subject || description).slice(0, 60)
+    const { subject, concepts } = describeOneShotSubject(description)
 
-    const canvas = { width: 1080, height: 1440 }
-    const LAYOUT_COUNT = 4
-    const candidates = []
+    // 2) 只取与主体词强相关的背景；抽象设计底图 / 无关降级图不会进入候选
+    const { backgrounds, matchInfo, message } = await buildOneShotBackgrounds(description, { count: 4, offset })
 
-    // (a) 精准图库实拍：用清洗后的主体词精确匹配，取「不同」的两张照片
-    try {
-      const hits = searchLocalPool(subjectQuery, { limit: 8 })
-      const start = poolCursor++ % Math.max(1, Math.min(6, hits.length || 1))
-      const rotated = [...hits.slice(start), ...hits.slice(0, start)]
-      for (const img of rotated.slice(0, 2)) {
-        const p = toPhoto(img)
-        p.url = proxyUrl(p.url)
-        p.thumb = proxyUrl(p.thumb)
-        candidates.push({ asset: p, origin: '图库实拍' })
-      }
-    } catch (e) {
-      console.warn('[inspire] one-shot 图库匹配失败：', e.message)
-    }
-
-    // (b) AI 生图：按主体词现画一张，作为其中一个方案的背景（限时，不阻塞出片）
-    try {
-      const aiBuffer = await oneShotAiBackdrop(subjectQuery)
-      if (aiBuffer) {
-        const dataUrl = encodeBufferToDataUrl(aiBuffer, 'image/jpeg')
-        candidates.unshift({
-          asset: {
-            id: `ai-shot-${Date.now()}`, provider: 'ai', sourceName: 'AI 生成',
-            url: dataUrl, thumb: dataUrl, photographer: 'AI 生成',
-            license: 'AI 生成 · 可商用',
-          },
-          origin: 'AI 生图',
-        })
-      }
-    } catch (e) {
-      console.warn('[inspire] one-shot AI 背景异常：', e.message)
-    }
-
-    // (c) 升级版设计底图补足到 4 张：distinct 模式强制每张用不同设计哲学
-    const need = LAYOUT_COUNT - candidates.length
-    if (need > 0) {
-      try {
-        const backdrops = generateDesignBackdrops(subjectQuery, {
-          count: need, width: 1080, height: 1440,
-          variantOffset: Math.floor(Math.random() * 6), distinct: true,
-        })
-        for (const b of backdrops) {
-          const dataUrl = encodeBufferToDataUrl(b.buffer, 'image/png')
-          candidates.push({
-            asset: {
-              id: b.id, provider: 'design', sourceName: '设计底图',
-              url: dataUrl, thumb: dataUrl,
-              photographer: '幻象工坊 · 设计库', license: '设计底图 · 可商用',
-            },
-            origin: '设计底图',
-          })
-        }
-      } catch (e) {
-        console.warn('[inspire] one-shot 设计底图生成失败：', e.message)
-      }
-    }
-
-    // 保证 4 个方案各有背景：极端情况下用不同哲学的另一张设计底图补齐
-    while (candidates.length > 0 && candidates.length < LAYOUT_COUNT) {
-      const b = generateDesignBackdrops(subjectQuery, {
-        count: 1, width: 1080, height: 1440,
-        variantOffset: LAYOUT_COUNT + candidates.length, distinct: true,
-      })[0]
-      const dataUrl = encodeBufferToDataUrl(b.buffer, 'image/png')
-      candidates.push({
-        asset: { id: b.id, provider: 'design', sourceName: '设计底图', url: dataUrl, thumb: dataUrl, photographer: '幻象工坊 · 设计库', license: '设计底图 · 可商用' },
-        origin: '设计底图',
+    if (!backgrounds.length) {
+      return res.json({
+        brief: { ...brief, mock: true, subject, enTerms: concepts.en },
+        content,
+        backgroundSource: 'none',
+        backgroundOrigins: [],
+        stockAsset: null,
+        stockAssets: [],
+        layouts: [],
+        matchInfo,
+        message,
       })
     }
 
-    const stockAssets = candidates.slice(0, LAYOUT_COUNT).map((c) => c.asset)
-    const backgroundOrigins = candidates.slice(0, LAYOUT_COUNT).map((c) => c.origin)
-    const backgroundSource = backgroundOrigins[0] || 'none'
+    const stockAssets = backgrounds.map((b) => b.asset)
+    const backgroundOrigins = backgrounds.map((b) => b.origin)
+    const canvas = { width: 1080, height: 1440 }
 
-    // 3) 生成版式方案：每个方案各用一张不同底图（排版逻辑保持不变）
+    // 3) 生成版式：每个方案各用一张不同底图；方案数按贴题背景实际数量截断，
+    //    不再为凑满 4 张而复用同一张图。
     const styleAnalysis = brief.styleKey ? { preset: brief.styleKey } : undefined
     const layouts = generateLayouts({
       content, purpose: brief.purpose, canvas, styleAnalysis,
       stockAsset: stockAssets[0] || null,
       stockAssets,
-    })
+    }).slice(0, stockAssets.length)
 
-    // 4) 渲染缩略图，并把「背景来源」标注到每个方案上
+    // 4) 渲染缩略图，并把「匹配主体 / 背景来源」标注到每个方案
     const results = []
     for (let i = 0; i < layouts.length; i++) {
       const l = layouts[i]
@@ -531,19 +433,22 @@ router.post(
         stockAttribution: l.stockAttribution,
         backgroundAsset: l.backgroundAsset,
         backgroundOrigin: backgroundOrigins[i] || '',
+        matchedSubject: matchInfo.subject,
         thumbnail: encodeBufferToDataUrl(buf),
       })
     }
 
     res.json({
-      brief: { ...brief, mock: true, subject: subjectQuery, enTerms },
+      brief: { ...brief, mock: true, subject, enTerms: concepts.en },
       content,
-      backgroundSource,
+      backgroundSource: backgroundOrigins[0] || 'none',
       backgroundOrigins,
       stockAsset: stockAssets[0] || null,
       stockAssets,
       layouts: results,
-      message: results.length ? '' : '生成失败，请重试。',
+      matchInfo,
+      offset,
+      message: results.length ? message : '生成失败，请重试。',
     })
   })
 )
